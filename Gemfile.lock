@@ -32,7 +32,11 @@ GEM
     simplecov_json_formatter (0.1.4)
 
 PLATFORMS
+  arm64-darwin
   arm64-darwin-25
+  arm64-linux
+  x86_64-darwin
+  x86_64-linux
 
 DEPENDENCIES
   rake (~> 13.0)
