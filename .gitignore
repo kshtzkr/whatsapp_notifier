@@ -2,3 +2,5 @@
 /vendor/bundle/
 /coverage/
 /*.gem
+.DS_Store
+**/.DS_Store

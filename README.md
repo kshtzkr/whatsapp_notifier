@@ -13,44 +13,38 @@ No official WhatsApp API setup, app review, or Meta webhook configuration is req
 - Mailer-like notification classes with `deliver_now` / `deliver_later`
 - Multi-user session support via `metadata[:user_id]`
 
+## Quick Start (60 seconds)
+
+```bash
+bundle add whatsapp_notifier
+bin/rails g whatsapp_notifier:install
+bin/dev
+```
+
+Then:
+
+- open `/dashboard/whatsapp/qr`
+- scan QR
+- send a test message
+
+If setup fails, run:
+
+```bash
+bundle exec whatsapp_notifier doctor
+```
+
 ## Installation
 
 ```ruby
-gem "whatsapp_notifier", github: "kshtzkr/whatsapp_notifier"
+gem "whatsapp_notifier"
 ```
 
 ```bash
 bundle install
+bin/rails g whatsapp_notifier:install
 ```
 
-## Quick Start
-
-### 1) Start the bundled Bun service
-
-```bash
-bundle exec whatsapp_notifier service --port 3001
-```
-
-That command:
-- validates Bun is installed
-- installs service dependencies (first run only)
-- starts the service
-
-### 2) Optional initializer
-
-Defaults already point to the local service (`http://127.0.0.1:3001`), so this is optional:
-
-```ruby
-# config/initializers/whatsapp_notifier.rb
-WhatsAppNotifier.configure do |config|
-  config.provider = :web_automation
-  config.web_automation_enabled = true
-  # Optional override:
-  # ENV["WHATSAPP_NOTIFIER_SERVICE_URL"] = "http://127.0.0.1:3001"
-end
-```
-
-### 3) Scan QR and check status
+## Scan QR and check status
 
 ```ruby
 # Use current_user.id for multi-user apps; omit metadata for a default shared session.
@@ -60,7 +54,7 @@ status = WhatsAppNotifier.connection_status(metadata: { user_id: current_user.id
 # => { state: "...", authenticated: true/false, has_qr: true/false }
 ```
 
-### 4) Send a message
+## Send a message
 
 ```ruby
 result = WhatsAppNotifier.deliver(
@@ -106,9 +100,15 @@ summary = WhatsAppNotifier.deliver_bulk(messages)
 summary[:success]
 ```
 
-## Rails Generator (Service Eject)
+## Generators
 
-If you want full control over the Bun service code in your app:
+Install everything with one command:
+
+```bash
+rails generate whatsapp_notifier:install
+```
+
+If you want to eject Bun service files into your app:
 
 ```bash
 rails generate whatsapp_notifier:install_service
@@ -123,4 +123,4 @@ This copies the service to `whatsapp_service/` and updates `.gitignore`.
 
 ## License
 
-MIT License.
+MIT. See `LICENSE.txt`.

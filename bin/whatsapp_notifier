@@ -9,14 +9,22 @@ module WhatsAppNotifier
       true
     end
 
+    desc "doctor", "Validate local setup and print exact fixes"
+    def doctor
+      ok = WhatsAppNotifier::Doctor.run
+      raise Thor::Error, "Doctor checks failed. Apply fixes above and run again." unless ok
+
+      puts "All checks passed."
+    end
+
     desc "service", "Start the WhatsApp automation service (Bun)"
-    option :port, type: :numeric, default: 3001, desc: "Port to run the service on"
+    option :port, type: :numeric, default: WhatsAppNotifier::Doctor::DEFAULT_PORT, desc: "Port to run the service on"
     def service
       service_path = WhatsAppNotifier.service_path
       puts "Starting WhatsApp Notifier Service from #{service_path}..."
 
       ENV["PORT"] ||= options[:port].to_s
-      ENV["WHATSAPP_SESSION_DIR"] ||= File.expand_path("tmp/whatsapp_notifier/.wwebjs_auth", Dir.pwd)
+      ENV["WHATSAPP_SESSION_DIR"] ||= WhatsAppNotifier::Doctor.session_dir
 
       unless system("bun --version > /dev/null 2>&1")
         raise Thor::Error, "Bun is required. Install from https://bun.sh"
