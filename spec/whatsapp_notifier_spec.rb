@@ -99,4 +99,5 @@ RSpec.describe WhatsAppNotifier do
     expect(described_class.scan_qr(provider: :web_automation, metadata: { user_id: 1 })).to eq("qr-code")
     expect(described_class.connection_status(provider: :web_automation, metadata: { user_id: 1 })).to include(state: "QR_REQUIRED")
   end
+
 end

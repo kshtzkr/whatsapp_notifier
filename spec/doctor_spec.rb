@@ -35,12 +35,26 @@ RSpec.describe WhatsAppNotifier::Doctor do
         io = StringIO.new
 
         allow(described_class).to receive(:system).with("bun --version > /dev/null 2>&1").and_return(false)
+        allow(File).to receive(:executable?).and_return(false)
         allow(FileUtils).to receive(:mkdir_p)
         allow(File).to receive(:write).and_raise(Errno::EACCES)
 
         expect(described_class.run(io: io, env: env, app_root: tmpdir)).to be(false)
         expect(io.string).to include("Quick fixes:")
       end
+    end
+  end
+
+  describe ".check_chromium" do
+    it "returns success when chromium is found in common paths" do
+      env = {}
+      allow(File).to receive(:executable?).and_return(false)
+      allow(File).to receive(:executable?).with("/usr/bin/chromium").and_return(true)
+
+      result = described_class.check_chromium(env: env)
+
+      expect(result[:ok]).to be(true)
+      expect(result[:message]).to include("/usr/bin/chromium")
     end
   end
 end
