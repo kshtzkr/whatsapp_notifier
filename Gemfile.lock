@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    whatsapp_notifier (0.2.0)
+    whatsapp_notifier (0.2.1)
       logger (>= 1.5)
       thor (>= 1.0)
 
