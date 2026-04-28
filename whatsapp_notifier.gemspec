@@ -6,8 +6,8 @@ Gem::Specification.new do |spec|
   spec.authors = ["Kshitiz Sinha"]
   spec.email = ["kshtzkr@gmail.com"]
 
-  spec.summary = "Rails-friendly WhatsApp notifications with pluggable providers"
-  spec.description = "Plug-and-play WhatsApp notifier gem with provider abstraction, bulk messaging safeguards, and mailer-like API."
+  spec.summary = "Production-ready WhatsApp messaging for Rails"
+  spec.description = "Add WhatsApp messaging to Rails in minutes with one install generator and one service command. Supports QR auth, multi-user sessions, mailer-style notifications, and safer bulk delivery with retries and rate limiting."
   spec.homepage = "https://github.com/kshtzkr/whatsapp_notifier"
   spec.license = "MIT"
   spec.required_ruby_version = ">= 2.6.0"

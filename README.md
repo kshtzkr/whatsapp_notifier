@@ -1,7 +1,7 @@
 # WhatsAppNotifier
 
-`whatsapp_notifier` is a Rails-friendly gem for WhatsApp Web automation.
-It is intentionally simple: run the bundled Bun service, scan a QR code, and send messages.
+`whatsapp_notifier` is production-ready WhatsApp messaging for Rails.
+Set it up in minutes with one install generator and one service command.
 
 No official WhatsApp API setup, app review, or Meta webhook configuration is required.
 
