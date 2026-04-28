@@ -5,6 +5,10 @@ require "whatsapp_notifier"
 
 module WhatsAppNotifier
   class CLI < Thor
+    def self.exit_on_failure?
+      true
+    end
+
     desc "service", "Start the WhatsApp automation service (Bun)"
     option :port, type: :numeric, default: 3001, desc: "Port to run the service on"
     def service
@@ -27,8 +31,9 @@ module WhatsAppNotifier
         # Ensure dependencies are installed
         unless File.exist?("node_modules")
           puts "Installing dependencies (bun install)..."
-          installed = system("bun install")
-          raise Thor::Error, "Failed to install Bun dependencies in #{service_path}" unless installed
+          unless system("bun install")
+            raise Thor::Error, "Failed to install Bun dependencies in #{service_path}"
+          end
         end
 
         exec("bun index.ts")

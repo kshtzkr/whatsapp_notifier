@@ -4,7 +4,8 @@
   "main": "index.ts",
   "dependencies": {
     "hono": "^4.0.0",
-    "whatsapp-web.js": "github:pedroslopez/whatsapp-web.js#webpack-exposer",
+    "whatsapp-web.js": "^1.26.0",
+
     "qrcode": "^1.5.3",
     "puppeteer": "^22.0.0"
   },
