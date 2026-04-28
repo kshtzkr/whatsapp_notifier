@@ -1,93 +1,126 @@
 # WhatsAppNotifier
 
-`whatsapp_notifier` is a plug-and-play Ruby gem for Rails-style WhatsApp notifications with:
+`whatsapp_notifier` is a Rails-friendly gem for WhatsApp Web automation.
+It is intentionally simple: run the bundled Bun service, scan a QR code, and send messages.
 
-- official provider support (recommended default)
-- optional WhatsApp Web automation (QR based, experimental)
-- guarded bulk delivery with pacing, retries, and wait-time handling
-- mailer-like notification classes (`deliver_now` and `deliver_later`)
+No official WhatsApp API setup, app review, or Meta webhook configuration is required.
+
+## What You Get
+
+- Bun-powered lightweight WhatsApp Web service (embedded in the gem)
+- QR scanning and connection status APIs
+- Single message and bulk message delivery APIs
+- Mailer-like notification classes with `deliver_now` / `deliver_later`
+- Multi-user session support via `metadata[:user_id]`
 
 ## Installation
 
-Add this line to your app's Gemfile:
-
 ```ruby
-gem "whatsapp_notifier"
+gem "whatsapp_notifier", github: "kshtzkr/whatsapp_notifier"
 ```
-
-Then run:
 
 ```bash
 bundle install
 ```
 
-## Quick setup
+## Quick Start
+
+### 1) Start the bundled Bun service
+
+```bash
+bundle exec whatsapp_notifier service --port 3001
+```
+
+That command:
+- validates Bun is installed
+- installs service dependencies (first run only)
+- starts the service
+
+### 2) Optional initializer
+
+Defaults already point to the local service (`http://127.0.0.1:3001`), so this is optional:
 
 ```ruby
 # config/initializers/whatsapp_notifier.rb
 WhatsAppNotifier.configure do |config|
-  config.provider = :official_api
-  config.official_sender = lambda do |payload|
-    # Integrate official API call here.
-    # Return keys: success, message_id, error_code, error_message, wait_seconds, metadata
-    { success: true, message_id: "msg-#{Time.now.to_i}" }
+  config.provider = :web_automation
+  config.web_automation_enabled = true
+  # Optional override:
+  # ENV["WHATSAPP_NOTIFIER_SERVICE_URL"] = "http://127.0.0.1:3001"
+end
+```
+
+### 3) Scan QR and check status
+
+```ruby
+# Use current_user.id for multi-user apps; omit metadata for a default shared session.
+qr_data_url = WhatsAppNotifier.scan_qr(metadata: { user_id: current_user.id })
+
+status = WhatsAppNotifier.connection_status(metadata: { user_id: current_user.id })
+# => { state: "...", authenticated: true/false, has_qr: true/false }
+```
+
+### 4) Send a message
+
+```ruby
+result = WhatsAppNotifier.deliver(
+  to: "+919999999999",
+  body: "Booking confirmed",
+  metadata: { user_id: current_user.id }
+)
+
+result.success?
+```
+
+## Notifications API
+
+```ruby
+class LeadWhatsappNotification < WhatsAppNotifier::Notification
+  def to
+    params[:lead].phone_number
+  end
+
+  def message
+    "Hi #{params[:lead].name}, we are working on your itinerary."
+  end
+
+  def metadata
+    { user_id: params[:user].id }
   end
 end
 ```
 
-## Send one message
-
 ```ruby
-WhatsAppNotifier.deliver(
-  to: "+919999999999",
-  body: "Booking confirmed"
-)
+LeadWhatsappNotification.with(lead: @lead, user: current_user).deliver_later
 ```
 
-## Bulk delivery
+## Bulk Messaging
 
 ```ruby
 messages = [
-  { to: "+919999999990", body: "Hello A", idempotency_key: "bulk-1" },
-  { to: "+919999999991", body: "Hello B", idempotency_key: "bulk-2" }
+  { to: "+919999999991", body: "Hello A", metadata: { user_id: current_user.id } },
+  { to: "+919999999992", body: "Hello B", metadata: { user_id: current_user.id } }
 ]
 
-result = WhatsAppNotifier.deliver_bulk(messages)
-result[:success] # => number of successful sends
+summary = WhatsAppNotifier.deliver_bulk(messages)
+summary[:success]
 ```
 
-## Mailer-like notifications
+## Rails Generator (Service Eject)
 
-```ruby
-class BookingNotification < WhatsAppNotifier::Notification
-  to "+919999999999"
-  provider :official_api
-  template :booking_confirmed, "Hi {{name}}, booking {{booking_id}} is confirmed."
-end
+If you want full control over the Bun service code in your app:
 
-BookingNotification.deliver_now(
-  params: { name: "Aman", booking_id: "BK-123" }
-)
+```bash
+rails generate whatsapp_notifier:install_service
 ```
 
-## QR scan (web automation provider)
+This copies the service to `whatsapp_service/` and updates `.gitignore`.
 
-```ruby
-WhatsAppNotifier.configure do |config|
-  config.provider = :web_automation
-  config.web_automation_enabled = true
-  config.web_adapter = YourAdapter.new
-end
+## Notes
 
-qr_text = WhatsAppNotifier.scan_qr
-```
+- This gem uses WhatsApp Web automation. Use responsibly and follow WhatsApp policies.
+- Keep Chromium available in your runtime (or set `PUPPETEER_EXECUTABLE_PATH`).
 
-## Compliance and safety
+## License
 
-- Keep `:official_api` as the default provider for policy-safe production use.
-- `:web_automation` is experimental and may violate WhatsApp terms depending on usage.
-- Bulk sending is rate-limited and can pause automatically on provider wait-time signals.
-
-More details:
-- [Rails setup](docs/rails_setup.md)
-- [Bulk messaging policy guardrails](docs/bulk_messaging_policy.md)
+MIT License.

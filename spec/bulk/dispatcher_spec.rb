@@ -27,8 +27,8 @@ RSpec.describe WhatsAppNotifier::Bulk::Dispatcher do
   it "delivers messages and summarizes result counts" do
     client = double
     allow(client).to receive(:deliver).and_return(
-      WhatsAppNotifier::Result.new(success: true, provider: :official_api),
-      WhatsAppNotifier::Result.new(success: false, provider: :official_api, error_code: :blocked)
+      WhatsAppNotifier::Result.new(success: true, provider: :web_automation),
+      WhatsAppNotifier::Result.new(success: false, provider: :web_automation, error_code: :blocked)
     )
     dispatcher = described_class.new(client: client, configuration: config, sleeper: ->(_seconds) {})
 
@@ -43,8 +43,8 @@ RSpec.describe WhatsAppNotifier::Bulk::Dispatcher do
     slept = []
     client = double
     allow(client).to receive(:deliver).and_return(
-      WhatsAppNotifier::Result.new(success: false, provider: :official_api, error_code: :rate_limited),
-      WhatsAppNotifier::Result.new(success: true, provider: :official_api, wait_seconds: 2)
+      WhatsAppNotifier::Result.new(success: false, provider: :web_automation, error_code: :rate_limited),
+      WhatsAppNotifier::Result.new(success: true, provider: :web_automation, wait_seconds: 2)
     )
     dispatcher = described_class.new(client: client, configuration: config, sleeper: ->(seconds) { slept << seconds })
 
@@ -57,7 +57,7 @@ RSpec.describe WhatsAppNotifier::Bulk::Dispatcher do
 
   it "deduplicates idempotency keys within one bulk run" do
     client = double
-    allow(client).to receive(:deliver).and_return(WhatsAppNotifier::Result.new(success: true, provider: :official_api))
+    allow(client).to receive(:deliver).and_return(WhatsAppNotifier::Result.new(success: true, provider: :web_automation))
     dispatcher = described_class.new(client: client, configuration: config, sleeper: ->(_seconds) {})
 
     summary = dispatcher.deliver(

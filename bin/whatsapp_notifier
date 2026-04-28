@@ -1,0 +1,40 @@
+#!/usr/bin/env ruby
+
+require "thor"
+require "whatsapp_notifier"
+
+module WhatsAppNotifier
+  class CLI < Thor
+    desc "service", "Start the WhatsApp automation service (Bun)"
+    option :port, type: :numeric, default: 3001, desc: "Port to run the service on"
+    def service
+      service_path = WhatsAppNotifier.service_path
+      puts "Starting WhatsApp Notifier Service from #{service_path}..."
+
+      ENV["PORT"] ||= options[:port].to_s
+      ENV["WHATSAPP_SESSION_DIR"] ||= File.expand_path("tmp/whatsapp_notifier/.wwebjs_auth", Dir.pwd)
+
+      unless system("bun --version > /dev/null 2>&1")
+        raise Thor::Error, "Bun is required. Install from https://bun.sh"
+      end
+
+      # Auto-detect Chromium in common locations for development
+      if !ENV["PUPPETEER_EXECUTABLE_PATH"] && File.exist?("/usr/bin/chromium")
+        ENV["PUPPETEER_EXECUTABLE_PATH"] = "/usr/bin/chromium"
+      end
+
+      Dir.chdir(service_path) do
+        # Ensure dependencies are installed
+        unless File.exist?("node_modules")
+          puts "Installing dependencies (bun install)..."
+          installed = system("bun install")
+          raise Thor::Error, "Failed to install Bun dependencies in #{service_path}" unless installed
+        end
+
+        exec("bun index.ts")
+      end
+    end
+  end
+end
+
+WhatsAppNotifier::CLI.start(ARGV)

@@ -3,7 +3,7 @@ require "spec_helper"
 class TestNotification < WhatsAppNotifier::Notification
   template :hello, "Hi {{name}}"
   to "+100"
-  provider :official_api
+  provider :web_automation
 end
 
 class ExplicitMessageNotification < WhatsAppNotifier::Notification
@@ -15,7 +15,13 @@ end
 RSpec.describe WhatsAppNotifier::Notification do
   before do
     WhatsAppNotifier.configure do |config|
-      config.official_sender = ->(payload) { { success: true, metadata: payload } }
+      config.provider = :web_automation
+      config.web_automation_enabled = true
+      config.web_adapter = double(
+        send_message: { success: true, metadata: {}, session: {} },
+        fetch_qr_code: "qr",
+        connection_status: { state: "AUTHENTICATED", authenticated: true }
+      )
     end
   end
 

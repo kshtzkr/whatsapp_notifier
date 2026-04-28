@@ -8,9 +8,9 @@ RSpec.describe WhatsAppNotifier::Bulk::RetryPolicy do
     result = policy.with_retries do
       attempts += 1
       if attempts < 3
-        WhatsAppNotifier::Result.new(success: false, provider: :official_api, error_code: :rate_limited)
+        WhatsAppNotifier::Result.new(success: false, provider: :web_automation, error_code: :rate_limited)
       else
-        WhatsAppNotifier::Result.new(success: true, provider: :official_api)
+        WhatsAppNotifier::Result.new(success: true, provider: :web_automation)
       end
     end
 
@@ -24,7 +24,7 @@ RSpec.describe WhatsAppNotifier::Bulk::RetryPolicy do
 
     result = policy.with_retries do
       attempts += 1
-      WhatsAppNotifier::Result.new(success: false, provider: :official_api, error_code: :blocked)
+      WhatsAppNotifier::Result.new(success: false, provider: :web_automation, error_code: :blocked)
     end
 
     expect(attempts).to eq(1)

@@ -2,8 +2,8 @@ require_relative "whatsapp_notifier/version"
 require_relative "whatsapp_notifier/errors"
 require_relative "whatsapp_notifier/result"
 require_relative "whatsapp_notifier/configuration"
+require_relative "whatsapp_notifier/web_adapter"
 require_relative "whatsapp_notifier/providers/base"
-require_relative "whatsapp_notifier/providers/official_api"
 require_relative "whatsapp_notifier/session/store"
 require_relative "whatsapp_notifier/session/qr_service"
 require_relative "whatsapp_notifier/providers/web_automation"
@@ -20,6 +20,10 @@ module WhatsAppNotifier
       yield(configuration)
       configuration.validate!
       @client = Client.new(configuration: configuration)
+    end
+
+    def service_path
+      File.expand_path("whatsapp_notifier/services/web_automation", __dir__)
     end
 
     def configuration
@@ -49,9 +53,14 @@ module WhatsAppNotifier
       client.deliver_bulk(messages, provider: provider, sleeper: sleeper, rng: rng)
     end
 
-    def scan_qr(provider: :web_automation)
-      client.scan_qr(provider: provider)
+    def scan_qr(provider: nil, metadata: {})
+      client.scan_qr(provider: provider, metadata: metadata)
     end
+
+    def connection_status(provider: nil, metadata: {})
+      client.connection_status(provider: provider, metadata: metadata)
+    end
+
   end
 end
 

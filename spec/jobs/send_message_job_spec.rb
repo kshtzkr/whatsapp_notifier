@@ -9,7 +9,13 @@ end
 RSpec.describe WhatsAppNotifier::Jobs::SendMessageJob do
   before do
     WhatsAppNotifier.configure do |config|
-      config.official_sender = ->(_payload) { { success: true } }
+      config.provider = :web_automation
+      config.web_automation_enabled = true
+      config.web_adapter = double(
+        send_message: { success: true, session: {} },
+        fetch_qr_code: "qr",
+        connection_status: { state: "AUTHENTICATED", authenticated: true }
+      )
     end
   end
 

@@ -11,10 +11,9 @@ This gem includes technical controls to reduce policy and spam risks:
 
 ## Recommended defaults
 
-- keep provider as `:official_api` in production
+- keep throughput conservative and user-scoped (`metadata[:user_id]`)
 - avoid unsolicited messaging
 - use explicit opt-in recipient lists
-- keep throughput conservative
 
 ## Wait-time compliance
 
@@ -28,4 +27,4 @@ the bulk dispatcher pauses for 30 seconds before moving forward.
 
 ## Web automation warning
 
-Using `:web_automation` can create account risk and policy risk. It is opt-in and should be limited to controlled internal scenarios.
+This gem uses `:web_automation`. Keep use-cases controlled, compliant, and consent-based.

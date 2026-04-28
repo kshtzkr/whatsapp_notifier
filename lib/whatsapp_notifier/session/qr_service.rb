@@ -8,18 +8,43 @@ module WhatsAppNotifier
         @adapter = adapter
       end
 
-      def qr_code
+      def qr_code(metadata: {})
         session = store.load
-        return session[:qr_code] if session[:qr_code]
+        user_id = metadata[:user_id]
+        cached = cached_qr(session, user_id)
+        return cached if cached
 
-        generated = adapter.fetch_qr_code
-        store.save(session.merge(qr_code: generated))
+        generated = adapter.fetch_qr_code(metadata: metadata)
+        store.save(with_cached_qr(session, user_id, generated))
         generated
       end
+
 
       def activate!(token)
         session = store.load
         store.save(session.merge(active: true, token: token, qr_code: nil))
+      end
+
+      private
+
+      def cached_qr(session, user_id)
+        return session[:qr_code] unless user_id
+
+        session.fetch(:users, {}).fetch(user_key(user_id), {})[:qr_code]
+      end
+
+      def with_cached_qr(session, user_id, qr_code)
+        return session.merge(qr_code: qr_code) unless user_id
+
+        users = session.fetch(:users, {})
+        key = user_key(user_id)
+        user_session = users.fetch(key, {})
+        users[key] = user_session.merge(qr_code: qr_code)
+        session.merge(users: users)
+      end
+
+      def user_key(user_id)
+        user_id.to_s.to_sym
       end
     end
   end

@@ -19,8 +19,12 @@ module WhatsAppNotifier
       Bulk::Dispatcher.new(client: self, configuration: @configuration, sleeper: sleeper, rng: rng).deliver(messages, provider: provider)
     end
 
-    def scan_qr(provider: nil)
-      provider_for(provider || @configuration.provider).scan_qr
+    def scan_qr(metadata: {}, provider: nil)
+      provider_for(provider || @configuration.provider).scan_qr(metadata: metadata)
+    end
+
+    def connection_status(metadata: {}, provider: nil)
+      provider_for(provider || @configuration.provider).connection_status(metadata: metadata)
     end
 
     private
@@ -30,14 +34,10 @@ module WhatsAppNotifier
     end
 
     def build_provider(key)
-      case key.to_sym
-      when :official_api
-        Providers::OfficialApi.new(configuration: @configuration)
-      when :web_automation
-        Providers::WebAutomation.new(configuration: @configuration)
-      else
-        raise ConfigurationError, "unknown provider: #{key.inspect}"
-      end
+      provider_key = key.to_sym
+      raise ConfigurationError, "unknown provider: #{key.inspect}" unless provider_key == :web_automation
+
+      Providers::WebAutomation.new(configuration: @configuration)
     end
   end
 end

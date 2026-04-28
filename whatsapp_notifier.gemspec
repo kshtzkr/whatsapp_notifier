@@ -16,8 +16,11 @@ Gem::Specification.new do |spec|
   spec.metadata["source_code_uri"] = "https://example.com/whatsapp_notifier/source"
   spec.metadata["changelog_uri"] = "https://example.com/whatsapp_notifier/changelog"
 
-  spec.files = Dir.glob("{lib,docs,examples,spec}/**/*") + %w[README.md Gemfile Rakefile]
+  spec.files = Dir.glob("{bin,lib,docs,examples,spec}/**/*") + %w[README.md Gemfile Rakefile]
+  spec.executables = ["whatsapp_notifier"]
   spec.require_paths = ["lib"]
 
   spec.add_dependency "logger", ">= 1.5"
+  spec.add_dependency "thor", ">= 1.0"
 end
+

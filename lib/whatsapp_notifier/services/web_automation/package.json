@@ -1,0 +1,14 @@
+{
+  "name": "whatsapp-service",
+  "version": "1.0.0",
+  "main": "index.ts",
+  "dependencies": {
+    "hono": "^4.0.0",
+    "whatsapp-web.js": "github:pedroslopez/whatsapp-web.js#webpack-exposer",
+    "qrcode": "^1.5.3",
+    "puppeteer": "^22.0.0"
+  },
+  "devDependencies": {
+    "bun-types": "latest"
+  }
+}
