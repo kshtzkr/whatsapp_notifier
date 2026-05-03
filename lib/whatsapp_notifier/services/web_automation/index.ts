@@ -119,8 +119,7 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
             dataPath: SESSION_BASE_DIR
         }),
         webVersionCache: {
-            type: 'remote',
-            remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
+            type: 'none'
         },
         puppeteer: {
             headless: true,
