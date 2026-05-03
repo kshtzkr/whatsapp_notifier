@@ -81,6 +81,10 @@ module WhatsAppNotifier
       )
     end
 
+    def deliver_later
+      self.class.deliver_later(params)
+    end
+
     private
 
     def render_template
