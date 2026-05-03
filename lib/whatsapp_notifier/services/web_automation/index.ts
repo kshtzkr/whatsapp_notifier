@@ -20,6 +20,7 @@ interface ClientData {
 }
 
 const clients = new Map<string, ClientData>();
+const initializingClients = new Set<string>();
 
 function sessionDirForUser(userId: string) {
     return join(SESSION_BASE_DIR, `session-user-${userId}`);
@@ -110,6 +111,13 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
         return data;
     }
 
+    // Prevent race conditions from concurrent status polls
+    if (initializingClients.has(userId)) {
+        // Return a temporary placeholder while initialization is in progress
+        return { client: null as any, state: 'INITIALIZING', qr: null, lastUsed: Date.now(), ready: false };
+    }
+    initializingClients.add(userId);
+
     console.log(`Initializing new WhatsApp client for User: ${userId}`);
     clearChromiumSingletonLocks(userId);
 
@@ -176,11 +184,22 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
         destroyClient(userId).catch(console.error);
     });
 
-    client.initialize().catch(err => {
-        console.error(`Initialization failed for user ${userId}`, err);
+    client.initialize().catch(async (err) => {
+        console.error(`Initialization failed for user ${userId}:`, err.message || err);
+        // Clean up the failed client
+        try { client.removeAllListeners(); } catch (_) {}
+        try { await client.destroy(); } catch (_) {}
         clients.delete(userId);
+        initializingClients.delete(userId);
+
+        // Auto-retry once after a cooldown
+        console.log(`Will retry initialization for user ${userId} in 10s...`);
+        setTimeout(() => {
+            getOrCreateClient(userId).catch(console.error);
+        }, 10000);
     });
 
+    initializingClients.delete(userId);
     return clientData;
 }
 
@@ -257,6 +276,15 @@ app.post('/send/:userId', async (c) => {
 
 
 console.log(`Starting Multi-User WhatsApp service (Bun Native) on port ${port}...`);
+
+// Prevent unhandled errors from crashing the entire Bun process
+process.on('unhandledRejection', (reason) => {
+    console.error('Unhandled rejection (caught globally, process stays alive):', reason);
+});
+
+process.on('uncaughtException', (err) => {
+    console.error('Uncaught exception (caught globally, process stays alive):', err.message);
+});
 
 process.on('exit', (code) => {
     console.log(`BUN PROCESS EXITING WITH CODE: ${code}`);

@@ -4,7 +4,7 @@
   "main": "index.ts",
   "dependencies": {
     "hono": "^4.12.9",
-    "whatsapp-web.js": "^1.34.6",
+    "whatsapp-web.js": "1.34.6",
     "qrcode": "^1.5.4"
   },
   "devDependencies": {
