@@ -112,24 +112,19 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
 
     console.log(`Initializing new WhatsApp client for User: ${userId}`);
     clearChromiumSingletonLocks(userId);
-    
+
     const client = new Client({
-        authStrategy: new LocalAuth({ 
+        authStrategy: new LocalAuth({
             clientId: `user-${userId}`,
             dataPath: SESSION_BASE_DIR
         }),
-        webVersionCache: {
-            type: 'none'
-        },
         puppeteer: {
             headless: true,
             args: [
-                '--no-sandbox', 
+                '--no-sandbox',
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--disable-web-security',
-                '--disable-features=IsolateOrigins,site-per-process'
+                '--disable-gpu'
             ],
             ...(BROWSER_EXECUTABLE_PATH ? { executablePath: BROWSER_EXECUTABLE_PATH } : {})
         }
@@ -202,18 +197,7 @@ async function destroyClient(userId: string) {
             console.error(`Error destroying client for ${userId}`, e);
         }
         clients.delete(userId);
-
-        // Optional: Clean up session files and puppeteer profiles if it was a logout
-        const userPath = sessionDirForUser(userId);
-        
-        if (existsSync(userPath)) {
-            try {
-                rmSync(userPath, { recursive: true, force: true });
-                console.log(`Cleaned up user data directory: ${userPath}`);
-            } catch (e) {
-                console.error(`Failed to delete directory: ${userPath}`, e);
-            }
-        }
+        // Session data is preserved on disk for auto-reconnect
     }
 }
 
@@ -285,6 +269,6 @@ process.on('SIGTERM', () => {
 
 // Correct way to keep Bun process alive with Hono
 export default Bun.serve({
-  port: port,
-  fetch: app.fetch,
+    port: port,
+    fetch: app.fetch,
 });
