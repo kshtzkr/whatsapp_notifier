@@ -9,13 +9,9 @@ module WhatsAppNotifier
       end
 
       def qr_code(metadata: {})
-        session = store.load
-        user_id = metadata[:user_id]
-        cached = cached_qr(session, user_id)
-        return cached if cached
-
         generated = adapter.fetch_qr_code(metadata: metadata)
-        store.save(with_cached_qr(session, user_id, generated))
+        # We don't cache the QR code because it expires every ~20 seconds
+        # The underlying adapter/service is responsible for providing the latest one
         generated
       end
 
