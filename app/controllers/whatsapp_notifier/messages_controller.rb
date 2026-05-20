@@ -1,9 +1,15 @@
 module WhatsAppNotifier
   class MessagesController < ApplicationController
+    # API endpoint: Hotwire / Stimulus calls send the Rails CSRF token in
+    # X-CSRF-Token automatically; allow callers without an authentic
+    # token by giving them a fresh session instead of a 422.
+    skip_before_action :verify_authenticity_token, raise: false
+
     # POST /send — single-recipient send for the current user
     def create
-      to       = params.require(:to)
-      message  = params.require(:message)
+      to        = params[:to] || params[:phone] or
+                  raise ActionController::ParameterMissing, "to (or phone)"
+      message   = params.require(:message)
       media_url = params[:media_url]
 
       result = WhatsAppNotifier.deliver(
