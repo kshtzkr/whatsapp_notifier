@@ -4,8 +4,19 @@ require "uri"
 
 module WhatsAppNotifier
   class WebAdapter
-    def initialize(base_url: ENV.fetch("WHATSAPP_NOTIFIER_SERVICE_URL", "http://127.0.0.1:3001"))
+    DEFAULT_OPEN_TIMEOUT = 5
+    DEFAULT_READ_TIMEOUT = 30
+
+    def self.default_base_url
+      ENV["WHATSAPP_NOTIFIER_SERVICE_URL"] || ENV["WHATSAPP_SERVICE_URL"] || "http://127.0.0.1:3001"
+    end
+
+    def initialize(base_url: self.class.default_base_url,
+                   open_timeout: DEFAULT_OPEN_TIMEOUT,
+                   read_timeout: DEFAULT_READ_TIMEOUT)
       @base_url = base_url
+      @open_timeout = open_timeout
+      @read_timeout = read_timeout
     end
 
     def send_message(payload:, session: {})
@@ -54,7 +65,9 @@ module WhatsAppNotifier
       req["Content-Type"] = "application/json"
       req.body = JSON.generate(body) if body
 
-      res = Net::HTTP.start(uri.host, uri.port) { |http| http.request(req) }
+      res = Net::HTTP.start(uri.host, uri.port,
+                            open_timeout: @open_timeout,
+                            read_timeout: @read_timeout) { |http| http.request(req) }
       parsed = parse_body(res.body)
       return parsed if res.is_a?(Net::HTTPSuccess)
 
