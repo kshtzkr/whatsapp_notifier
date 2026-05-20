@@ -5,7 +5,9 @@ module WhatsAppNotifier
     attr_accessor :provider, :web_adapter, :web_session_path,
                   :bulk_base_delay_seconds, :bulk_jitter_seconds, :bulk_max_recipients,
                   :bulk_max_attempts, :bulk_retryable_error_codes, :logger,
-                  :web_automation_enabled, :warn_on_risky_provider
+                  :web_automation_enabled, :warn_on_risky_provider,
+                  :authenticate_with, :current_user_id_resolver,
+                  :parent_controller
 
     def initialize
       @provider = :web_automation
@@ -19,6 +21,9 @@ module WhatsAppNotifier
       @logger = Logger.new($stdout)
       @web_automation_enabled = true
       @warn_on_risky_provider = true
+      @authenticate_with = nil
+      @current_user_id_resolver = -> { respond_to?(:current_user) && current_user ? current_user.id : nil }
+      @parent_controller = "::ApplicationController"
     end
 
     def validate!

@@ -19,7 +19,7 @@ Gem::Specification.new do |spec|
   spec.metadata["bug_tracker_uri"] = "https://github.com/kshtzkr/whatsapp_notifier/issues"
   spec.metadata["rubygems_mfa_required"] = "true"
 
-  spec.files = Dir.glob("{bin,lib,docs,examples,spec}/**/*") + %w[README.md LICENSE.txt Gemfile Rakefile]
+  spec.files = Dir.glob("{app,config,bin,lib,docs,examples,spec}/**/*") + %w[README.md LICENSE.txt Gemfile Rakefile]
   spec.executables = ["whatsapp_notifier"]
   spec.require_paths = ["lib"]
 

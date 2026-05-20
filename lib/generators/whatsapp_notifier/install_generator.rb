@@ -12,6 +12,20 @@ module WhatsAppNotifier
         template "whatsapp_notifier.rb", "config/initializers/whatsapp_notifier.rb"
       end
 
+      def mount_engine
+        routes_path = "config/routes.rb"
+        return unless File.exist?(routes_path)
+
+        content = File.read(routes_path)
+        return if content.include?("mount WhatsAppNotifier::Engine")
+
+        inject_into_file(
+          routes_path,
+          %(  mount WhatsAppNotifier::Engine, at: "/whatsapp"\n),
+          after: /Rails\.application\.routes\.draw do\n/
+        )
+      end
+
       def ensure_procfile_entry
         procfile = "Procfile.dev"
         line = "whatsapp: bundle exec whatsapp_notifier service"

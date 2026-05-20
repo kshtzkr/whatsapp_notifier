@@ -66,7 +66,9 @@ module WhatsAppNotifier
 end
 
 # :nocov:
-if defined?(Rails::Railtie)
+if defined?(Rails::Engine)
+  require_relative "whatsapp_notifier/engine"
+elsif defined?(Rails::Railtie)
   require_relative "whatsapp_notifier/railtie"
 end
 # :nocov:
