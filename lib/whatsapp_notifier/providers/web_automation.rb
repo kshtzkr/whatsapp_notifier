@@ -48,6 +48,19 @@ module WhatsAppNotifier
         adapter.connection_status(metadata: metadata)
       end
 
+      # Pull pending inbound messages for the user. fetch_inbound is an
+      # optional adapter capability (added in v0.4.0) — older adapters that
+      # predate inbound support raise a clear ConfigurationError rather than
+      # NoMethodError, and Configuration#validate! does not require it.
+      def fetch_inbound(metadata: {})
+        raise ConfigurationError, "web automation provider is disabled" unless configuration.web_automation_enabled
+
+        adapter = configuration.web_adapter
+        raise ConfigurationError, "web_adapter does not support inbound capture (upgrade to a fetch_inbound-capable adapter)" unless adapter.respond_to?(:fetch_inbound)
+
+        adapter.fetch_inbound(metadata: metadata)
+      end
+
 
       private
 

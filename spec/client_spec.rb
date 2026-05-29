@@ -49,4 +49,21 @@ RSpec.describe WhatsAppNotifier::Client do
       expect(status).to include(state: "QR_REQUIRED")
     end
   end
+
+  it "delegates fetch_inbound to the provider" do
+    Dir.mktmpdir do |dir|
+      config.provider = :web_automation
+      config.web_automation_enabled = true
+      config.web_session_path = File.join(dir, "session.json")
+      config.web_adapter = double(
+        send_message: { success: true, session: {} },
+        fetch_qr_code: "qr",
+        connection_status: { state: "AUTHENTICATED", authenticated: true },
+        fetch_inbound: [{ from: "a@c.us", body: "hi" }]
+      )
+      client = described_class.new(configuration: config)
+
+      expect(client.fetch_inbound(provider: :web_automation)).to eq([{ from: "a@c.us", body: "hi" }])
+    end
+  end
 end

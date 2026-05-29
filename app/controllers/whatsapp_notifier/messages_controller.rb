@@ -30,5 +30,18 @@ module WhatsAppNotifier
       render json: { success: false, error: e.message },
              status: :internal_server_error
     end
+
+    # GET /inbound — drain pending inbound messages for the current user.
+    # Optional convenience for host apps that prefer pulling through Rails
+    # instead of calling WhatsAppNotifier.fetch_inbound directly.
+    def inbound
+      messages = WhatsAppNotifier.fetch_inbound(
+        metadata: { user_id: whatsapp_notifier_user_id }
+      )
+      render json: { messages: messages }
+    rescue StandardError => e
+      render json: { success: false, error: e.message },
+             status: :internal_server_error
+    end
   end
 end

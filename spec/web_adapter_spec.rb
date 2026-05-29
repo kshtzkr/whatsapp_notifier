@@ -24,6 +24,20 @@ RSpec.describe WhatsAppNotifier::WebAdapter do
     expect(result).to include(success: true, message_id: "k1")
   end
 
+  it "yields the http connection to run the request" do
+    response = http_success(body: { "success" => true })
+    http = instance_double(Net::HTTP, request: response)
+    allow(Net::HTTP).to receive(:start).and_yield(http).and_return(response)
+
+    result = adapter.send_message(
+      payload: { to: "+1", body: "hi", metadata: {}, idempotency_key: "k1" },
+      session: {}
+    )
+
+    expect(result).to include(success: true)
+    expect(http).to have_received(:request)
+  end
+
   it "fetches qr and status data" do
     qr_response = http_success(body: { "qr" => "data:image/png;base64,qr" })
     status_response = http_success(body: { "state" => "AUTHENTICATED", "authenticated" => true, "hasQR" => false })
@@ -51,5 +65,38 @@ RSpec.describe WhatsAppNotifier::WebAdapter do
 
     expect(adapter.fetch_qr_code(metadata: {})).to be_nil
     expect { adapter.connection_status(metadata: {}) }.to raise_error(/raw-error/)
+  end
+
+  it "fetches inbound messages from a bare array body" do
+    body = [
+      { "from" => "919@c.us", "body" => "hi", "messageId" => "m1", "timestamp" => 123, "type" => "chat" }
+    ]
+    allow(Net::HTTP).to receive(:start).and_return(http_success(body: body))
+
+    messages = adapter.fetch_inbound(metadata: { user_id: "u-1" })
+
+    expect(messages).to eq([{ from: "919@c.us", body: "hi", message_id: "m1", timestamp: 123, type: "chat" }])
+  end
+
+  it "fetches inbound from a {messages:} envelope and accepts the message_id alias" do
+    body = { "messages" => [{ "from" => "918@c.us", "body" => "yo", "message_id" => "m2", "timestamp" => 9 }] }
+    allow(Net::HTTP).to receive(:start).and_return(http_success(body: body))
+
+    messages = adapter.fetch_inbound(metadata: { user_id: "u-1" })
+
+    expect(messages.first).to include(from: "918@c.us", message_id: "m2", type: nil)
+  end
+
+  it "returns an empty array when the inbound body is empty" do
+    empty = instance_double(Net::HTTPOK, body: "", code: "200", is_a?: true)
+    allow(Net::HTTP).to receive(:start).and_return(empty)
+
+    expect(adapter.fetch_inbound(metadata: {})).to eq([])
+  end
+
+  it "raises when the inbound fetch fails" do
+    allow(Net::HTTP).to receive(:start).and_return(http_failure(code: "500", body: JSON.generate({ error: "down" })))
+
+    expect { adapter.fetch_inbound(metadata: {}) }.to raise_error(/service request failed/)
   end
 end

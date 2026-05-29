@@ -3,6 +3,16 @@ import { Hono } from 'hono';
 import { rmSync, existsSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { toDataURL } from 'qrcode';
+import {
+    InboundMsg,
+    configureInbound,
+    loadTargets,
+    rememberTarget,
+    enqueueInbound,
+    drainInbound,
+    shouldCapture,
+    normalizeInbound
+} from './inbound';
 
 const app = new Hono();
 const port = Number(process.env.PORT || 3001);
@@ -21,6 +31,53 @@ interface ClientData {
 
 const clients = new Map<string, ClientData>();
 const initializingClients = new Set<string>();
+
+// ── Inbound capture (v0.4.0) — core logic lives in ./inbound.ts ──
+const WEBHOOK_URL = process.env.WHATSAPP_WEBHOOK_URL;
+const WEBHOOK_TOKEN = process.env.WHATSAPP_WEBHOOK_TOKEN;
+
+// Tell the inbound core how to resolve each user's on-disk session dir.
+configureInbound(sessionDirForUser);
+
+async function pushWebhook(userId: string, msg: InboundMsg) {
+    if (!WEBHOOK_URL) return;
+    try {
+        await fetch(WEBHOOK_URL, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                ...(WEBHOOK_TOKEN ? { 'X-WA-Token': WEBHOOK_TOKEN } : {})
+            },
+            body: JSON.stringify({ userId, message: msg })
+        });
+    } catch (e) {
+        console.error(`Webhook push failed for ${userId}`, e);
+    }
+}
+
+// Wrapper: allowlist/sanity filter → normalize → enqueue → optional webhook.
+function captureInbound(userId: string, msg: any) {
+    try {
+        if (!shouldCapture(userId, msg)) return;
+        const inbound = normalizeInbound(msg);
+        enqueueInbound(userId, inbound);
+        pushWebhook(userId, inbound);
+    } catch (e) {
+        console.error(`captureInbound error for ${userId}`, e);
+    }
+}
+
+async function backfillInbound(userId: string, client: Client) {
+    // On reconnect, replay recent messages from allowlisted chats so a
+    // disconnect window doesn't silently drop replies. Rails dedupes.
+    for (const chatId of loadTargets(userId)) {
+        try {
+            const chat = await client.getChatById(chatId);
+            const msgs = await chat.fetchMessages({ limit: 20 });
+            for (const m of msgs) captureInbound(userId, m);
+        } catch (_) { /* chat not materialized yet → skip */ }
+    }
+}
 
 function sessionDirForUser(userId: string) {
     return join(SESSION_BASE_DIR, `session-user-${userId}`);
@@ -163,7 +220,12 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
         clientData.qr = null;
         clientData.ready = true;
         console.log(`Client is READY for User ${userId}`);
+        // Replay anything that arrived while we were disconnected.
+        backfillInbound(userId, client).catch((e) => console.error(`Backfill failed for ${userId}`, e));
     });
+
+    // Capture inbound replies (filtered to people this user messaged first).
+    client.on('message', (msg) => captureInbound(userId, msg));
 
     client.on('authenticated', () => {
         clientData.state = 'AUTHENTICATED';
@@ -266,12 +328,24 @@ app.post('/send/:userId', async (c) => {
         const chatId = to.includes('@c.us') ? to : `${to}@c.us`;
         await sendMessageWithRetry(data.client, data, chatId, message, mediaUrl);
 
+        // Record the recipient so their replies pass the inbound allowlist.
+        rememberTarget(userId, chatId);
+
         data.lastUsed = Date.now();
         return c.json({ success: true });
     } catch (error: any) {
         console.error(`Send error for user ${userId}:`, error);
         return c.json({ success: false, error: error.message }, 500);
     }
+});
+
+// GET /inbound/:userId — drain the user's pending inbound queue.
+// Returns { messages: [...] } and clears the buffer (at-least-once;
+// the Rails side dedupes on messageId).
+app.get('/inbound/:userId', async (c) => {
+    const userId = c.req.param('userId');
+    await getOrCreateClient(userId);
+    return c.json({ messages: drainInbound(userId) });
 });
 
 

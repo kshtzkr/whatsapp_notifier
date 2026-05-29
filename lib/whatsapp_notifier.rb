@@ -62,6 +62,10 @@ module WhatsAppNotifier
       client.connection_status(provider: provider, metadata: metadata)
     end
 
+    def fetch_inbound(provider: nil, metadata: {})
+      client.fetch_inbound(provider: provider, metadata: metadata)
+    end
+
   end
 end
 

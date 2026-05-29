@@ -93,11 +93,29 @@ RSpec.describe WhatsAppNotifier do
     allow(fake_client).to receive(:deliver_bulk).and_return(total: 0, success: 0, failed: 0, results: [])
     allow(fake_client).to receive(:scan_qr).and_return("qr-code")
     allow(fake_client).to receive(:connection_status).and_return(state: "QR_REQUIRED")
+    allow(fake_client).to receive(:fetch_inbound).and_return([{ from: "q@c.us" }])
     described_class.instance_variable_set(:@client, fake_client)
 
     expect(described_class.deliver_bulk([], provider: :web_automation)[:total]).to eq(0)
     expect(described_class.scan_qr(provider: :web_automation, metadata: { user_id: 1 })).to eq("qr-code")
     expect(described_class.connection_status(provider: :web_automation, metadata: { user_id: 1 })).to include(state: "QR_REQUIRED")
+    expect(described_class.fetch_inbound(provider: :web_automation, metadata: { user_id: 1 })).to eq([{ from: "q@c.us" }])
+  end
+
+  it "fetches inbound through the module API end to end" do
+    adapter = double(
+      send_message: { success: true, session: {} },
+      fetch_qr_code: "qr",
+      connection_status: { state: "AUTHENTICATED", authenticated: true },
+      fetch_inbound: [{ from: "z@c.us", body: "ping" }]
+    )
+    described_class.configure do |config|
+      config.provider = :web_automation
+      config.web_automation_enabled = true
+      config.web_adapter = adapter
+    end
+
+    expect(described_class.fetch_inbound(metadata: { user_id: 1 })).to eq([{ from: "z@c.us", body: "ping" }])
   end
 
 end

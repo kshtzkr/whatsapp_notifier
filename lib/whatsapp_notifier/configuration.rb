@@ -7,7 +7,7 @@ module WhatsAppNotifier
                   :bulk_max_attempts, :bulk_retryable_error_codes, :logger,
                   :web_automation_enabled, :warn_on_risky_provider,
                   :authenticate_with, :current_user_id_resolver,
-                  :parent_controller
+                  :parent_controller, :on_inbound_message_handler
 
     def initialize
       @provider = :web_automation
@@ -24,6 +24,9 @@ module WhatsAppNotifier
       @authenticate_with = nil
       @current_user_id_resolver = -> { respond_to?(:current_user) && current_user ? current_user.id : nil }
       @parent_controller = "::ApplicationController"
+      # Optional host hook: a callable invoked with each inbound message hash.
+      # Lets a push-based integration react without polling. Nil = no handler.
+      @on_inbound_message_handler = nil
     end
 
     def validate!

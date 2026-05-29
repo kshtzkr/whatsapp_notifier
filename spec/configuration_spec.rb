@@ -44,4 +44,20 @@ RSpec.describe WhatsAppNotifier::Configuration do
 
     expect { config.validate! }.to raise_error(WhatsAppNotifier::ConfigurationError, /web_adapter must be configured/)
   end
+
+  it "exposes an inbound message handler accessor that defaults to nil" do
+    config = described_class.new
+    expect(config.on_inbound_message_handler).to be_nil
+
+    handler = ->(msg) { msg }
+    config.on_inbound_message_handler = handler
+    expect(config.on_inbound_message_handler).to eq(handler)
+  end
+
+  it "validates without requiring fetch_inbound on the adapter (inbound is optional)" do
+    config = described_class.new
+    config.web_adapter = double(send_message: {}, fetch_qr_code: "qr", connection_status: {})
+
+    expect { config.validate! }.not_to raise_error
+  end
 end

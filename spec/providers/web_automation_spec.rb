@@ -106,4 +106,34 @@ RSpec.describe WhatsAppNotifier::Providers::WebAutomation do
       expect(adapter).to have_received(:send_message).with(payload: hash_including(metadata: { user_id: "user-b" }), session: {}).once
     end
   end
+
+  it "fetches inbound via the adapter when enabled" do
+    Dir.mktmpdir do |dir|
+      adapter = double(fetch_qr_code: "qr", connection_status: {}, fetch_inbound: [{ from: "x@c.us", body: "hi" }])
+      config = build_config(path: File.join(dir, "session.json"), adapter: adapter)
+      provider = described_class.new(configuration: config)
+
+      expect(provider.fetch_inbound(metadata: { user_id: 1 })).to eq([{ from: "x@c.us", body: "hi" }])
+    end
+  end
+
+  it "raises on fetch_inbound when the provider is disabled" do
+    Dir.mktmpdir do |dir|
+      adapter = double(fetch_qr_code: "qr", connection_status: {}, fetch_inbound: [])
+      config = build_config(path: File.join(dir, "session.json"), adapter: adapter, enabled: false)
+      provider = described_class.new(configuration: config)
+
+      expect { provider.fetch_inbound }.to raise_error(WhatsAppNotifier::ConfigurationError, /disabled/)
+    end
+  end
+
+  it "raises on fetch_inbound when the adapter lacks inbound support" do
+    Dir.mktmpdir do |dir|
+      adapter = double(fetch_qr_code: "qr", connection_status: {})
+      config = build_config(path: File.join(dir, "session.json"), adapter: adapter)
+      provider = described_class.new(configuration: config)
+
+      expect { provider.fetch_inbound }.to raise_error(WhatsAppNotifier::ConfigurationError, /inbound capture/)
+    end
+  end
 end
