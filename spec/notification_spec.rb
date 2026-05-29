@@ -35,6 +35,12 @@ RSpec.describe WhatsAppNotifier::Notification do
     expect { TestNotification.deliver_later(params: { name: "Neha" }) }.not_to raise_error
   end
 
+  it "delegates an instance deliver_later to the class" do
+    stub_const("ActiveJob::Base", Class.new)
+    notification = TestNotification.with(params: { name: "Neha" })
+    expect { notification.deliver_later }.not_to raise_error
+  end
+
   it "raises for deliver_later without active job" do
     hide_const("ActiveJob")
     expect { TestNotification.deliver_later(params: { name: "Neha" }) }.to raise_error(LoadError)
