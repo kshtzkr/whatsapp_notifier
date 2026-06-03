@@ -9,6 +9,17 @@ const port = Number(process.env.PORT || 3001);
 const SESSION_BASE_DIR = process.env.WHATSAPP_SESSION_DIR || '/whatsapp_data';
 const BROWSER_EXECUTABLE_PATH = process.env.PUPPETEER_EXECUTABLE_PATH;
 
+// Recycle a client that boots Chromium but never reaches QR/READY (e.g. after a
+// WhatsApp Web update breaks the injected store), instead of wedging in
+// INITIALIZING forever with no QR.
+const INIT_TIMEOUT_MS = Number(process.env.WHATSAPP_INIT_TIMEOUT_MS || 90000);
+// Optionally pin the WhatsApp Web build so a live web.whatsapp.com change can't
+// silently break the client. Set WWEBJS_WEB_VERSION to a known-good version
+// (e.g. "2.3000.1023204887"); leave unset to use the library default.
+const WEB_VERSION = process.env.WWEBJS_WEB_VERSION || null;
+const WEB_VERSION_CACHE_URL = process.env.WWEBJS_WEB_VERSION_CACHE_URL ||
+    'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/{version}.html';
+
 // Multi-user client management
 interface ClientData {
     client: Client;
@@ -17,10 +28,18 @@ interface ClientData {
     lastUsed: number;
     isDestroying?: boolean;
     ready?: boolean;
+    initTimer?: ReturnType<typeof setTimeout>;
 }
 
 const clients = new Map<string, ClientData>();
 const initializingClients = new Set<string>();
+
+function clearInitTimer(clientData: ClientData) {
+    if (clientData.initTimer) {
+        clearTimeout(clientData.initTimer);
+        clientData.initTimer = undefined;
+    }
+}
 
 function sessionDirForUser(userId: string) {
     return join(SESSION_BASE_DIR, `session-user-${userId}`);
@@ -135,7 +154,11 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
                 '--disable-gpu'
             ],
             ...(BROWSER_EXECUTABLE_PATH ? { executablePath: BROWSER_EXECUTABLE_PATH } : {})
-        }
+        },
+        ...(WEB_VERSION ? {
+            webVersion: WEB_VERSION,
+            webVersionCache: { type: 'remote' as const, remotePath: WEB_VERSION_CACHE_URL }
+        } : {})
     });
 
     const clientData: ClientData = {
@@ -148,8 +171,18 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
 
     clients.set(userId, clientData);
 
+    // Watchdog: if the client never reaches QR/READY, recycle it so the next
+    // poll spins a fresh attempt instead of wedging in INITIALIZING forever.
+    clientData.initTimer = setTimeout(() => {
+        if (clientData.state === 'INITIALIZING' && !clientData.qr && !clientData.ready) {
+            console.error(`User ${userId} stuck INITIALIZING > ${INIT_TIMEOUT_MS}ms — recycling`);
+            destroyClient(userId).catch(console.error);
+        }
+    }, INIT_TIMEOUT_MS);
+
     client.on('qr', async (qr) => {
         clientData.state = 'QR_REQUIRED';
+        clearInitTimer(clientData); // progress made — QR is showable
         try {
             clientData.qr = await toDataURL(qr);
             console.log(`QR RECEIVED and converted for User ${userId}`);
@@ -162,18 +195,21 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
         clientData.state = 'AUTHENTICATED';
         clientData.qr = null;
         clientData.ready = true;
+        clearInitTimer(clientData);
         console.log(`Client is READY for User ${userId}`);
     });
 
     client.on('authenticated', () => {
         clientData.state = 'AUTHENTICATED';
         clientData.ready = false;
+        clearInitTimer(clientData);
         console.log(`AUTHENTICATED for User ${userId}`);
     });
 
     client.on('auth_failure', (msg) => {
         clientData.state = 'DISCONNECTED';
         clientData.ready = false;
+        clearInitTimer(clientData);
         console.error(`AUTHENTICATION FAILURE for User ${userId}`, msg);
     });
 
@@ -186,6 +222,7 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
 
     client.initialize().catch(async (err) => {
         console.error(`Initialization failed for user ${userId}:`, err.message || err);
+        clearInitTimer(clientData);
         // Clean up the failed client
         try { client.removeAllListeners(); } catch (_) {}
         try { await client.destroy(); } catch (_) {}
@@ -203,11 +240,12 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
     return clientData;
 }
 
-async function destroyClient(userId: string) {
+async function destroyClient(userId: string, clearSession: boolean = false) {
     const data = clients.get(userId);
     if (data && !data.isDestroying) {
         data.isDestroying = true;
-        console.log(`Destroying WhatsApp client for User: ${userId}`);
+        clearInitTimer(data);
+        console.log(`Destroying WhatsApp client for User: ${userId} (clearSession: ${clearSession})`);
         try {
             // Unregister listeners to prevent loops or double-destroys
             data.client.removeAllListeners();
@@ -216,7 +254,18 @@ async function destroyClient(userId: string) {
             console.error(`Error destroying client for ${userId}`, e);
         }
         clients.delete(userId);
-        // Session data is preserved on disk for auto-reconnect
+        // Session data is preserved on disk for auto-reconnect (unless clearing below).
+    }
+    // On explicit logout, wipe the persisted Chromium profile / WhatsApp session
+    // from disk — even if there was no live client in memory.
+    if (clearSession) {
+        const dir = sessionDirForUser(userId);
+        try {
+            rmSync(dir, { recursive: true, force: true });
+            console.log(`Cleared session dir for User: ${userId}`);
+        } catch (e) {
+            console.error(`Failed to clear session dir for ${userId}`, e);
+        }
     }
 }
 
@@ -248,6 +297,17 @@ app.get('/qr/:userId', async (c) => {
     const userId = c.req.param('userId');
     const data = await getOrCreateClient(userId);
     return c.json({ qr: data.qr });
+});
+
+// Explicit per-user logout: disconnect the client and wipe the saved WhatsApp
+// session from disk so the next connect starts fresh with a new QR. Triggered by
+// the user-settings "Log out WhatsApp" button — NOT by app sign-out.
+app.post('/logout/:userId', async (c) => {
+    const userId = c.req.param('userId');
+    console.log(`Logout requested for User: ${userId}`);
+    await destroyClient(userId, true);
+    initializingClients.delete(userId);
+    return c.json({ success: true });
 });
 
 app.post('/send/:userId', async (c) => {

@@ -54,6 +54,20 @@ status = WhatsAppNotifier.connection_status(metadata: { user_id: current_user.id
 # => { state: "...", authenticated: true/false, has_qr: true/false }
 ```
 
+## Log out (disconnect + clear session)
+
+Explicitly disconnects the user and wipes their saved WhatsApp session from the
+service, so the next connect starts fresh with a new QR. Call this from a
+user-initiated "Log out WhatsApp" action — NOT from your app's sign-out, which
+should leave the WhatsApp session intact for the next login.
+
+```ruby
+WhatsAppNotifier.logout(metadata: { user_id: current_user.id })
+# => { success: true }
+```
+
+The mounted engine also exposes `DELETE /whatsapp/logout` for the same effect.
+
 ## Send a message
 
 ```ruby
@@ -120,6 +134,13 @@ This copies the service to `whatsapp_service/` and updates `.gitignore`.
 
 - This gem uses WhatsApp Web automation. Use responsibly and follow WhatsApp policies.
 - Keep Chromium available in your runtime (or set `PUPPETEER_EXECUTABLE_PATH`).
+- Session profiles persist under `WHATSAPP_SESSION_DIR` (default `/whatsapp_data`).
+  Mount it on durable storage so logins survive restarts; the service clears stale
+  Chromium `SingletonLock` files on each launch so an unclean exit can't wedge it.
+- Resilience knobs: `WHATSAPP_INIT_TIMEOUT_MS` (default 90000) recycles a client
+  that never reaches QR/READY; set `WWEBJS_WEB_VERSION` (e.g. `2.3000.1023204887`,
+  optionally `WWEBJS_WEB_VERSION_CACHE_URL`) to pin the WhatsApp Web build so a
+  live web.whatsapp.com change can't silently break the client.
 
 ## License
 
