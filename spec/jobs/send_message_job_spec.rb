@@ -24,13 +24,14 @@ RSpec.describe WhatsAppNotifier::Jobs::SendMessageJob do
     expect(result).to be_success
   end
 
-  it "raises when perform_later has no active job base" do
-    hide_const("ActiveJob")
-    expect { described_class.perform_later("JobNotification", to: "+1") }.to raise_error(LoadError)
+  it "falls back to synchronous delivery when ActiveJob is unavailable" do
+    # ActiveJob is not a gem dependency, so the sync-fallback class is the one
+    # that loads; perform_later runs perform_now rather than raising.
+    result = described_class.perform_later("JobNotification", to: "+1")
+    expect(result).to be_success
   end
 
-  it "allows perform_later when active job base is present" do
-    stub_const("ActiveJob::Base", Class.new)
+  it "allows perform_later without raising" do
     expect { described_class.perform_later("JobNotification", to: "+1") }.not_to raise_error
   end
 end

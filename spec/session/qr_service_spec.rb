@@ -12,7 +12,7 @@ RSpec.describe WhatsAppNotifier::Session::QrService do
     end
   end
 
-  it "caches qr code per user_id when metadata is provided" do
+  it "fetches a fresh qr on every call (codes expire, so no caching) and passes metadata" do
     Dir.mktmpdir do |dir|
       store = WhatsAppNotifier::Session::Store.new(path: File.join(dir, "s.json"))
       adapter = double
@@ -20,10 +20,9 @@ RSpec.describe WhatsAppNotifier::Session::QrService do
       service = described_class.new(store: store, adapter: adapter)
 
       expect(service.qr_code(metadata: { user_id: 1 })).to eq("qr-user-1")
-      expect(service.qr_code(metadata: { user_id: 1 })).to eq("qr-user-1")
-      expect(service.qr_code(metadata: { user_id: 2 })).to eq("qr-user-2")
+      expect(service.qr_code(metadata: { user_id: 1 })).to eq("qr-user-2")
 
-      expect(adapter).to have_received(:fetch_qr_code).twice
+      expect(adapter).to have_received(:fetch_qr_code).with(metadata: { user_id: 1 }).twice
     end
   end
 

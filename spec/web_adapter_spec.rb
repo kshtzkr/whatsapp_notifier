@@ -64,4 +64,14 @@ RSpec.describe WhatsAppNotifier::WebAdapter do
 
     expect(adapter.logout(metadata: {})).to eq(success: false)
   end
+
+  it "executes the request inside the Net::HTTP block" do
+    fake_http = instance_double(Net::HTTP)
+    allow(fake_http).to receive(:request).and_return(http_success(body: { "qr" => "data:image/png;base64,x" }))
+    # Invoke the block so the real request path runs (other specs stub it away).
+    allow(Net::HTTP).to receive(:start) { |*_args, &blk| blk.call(fake_http) }
+
+    expect(adapter.fetch_qr_code(metadata: { user_id: 1 })).to eq("data:image/png;base64,x")
+    expect(fake_http).to have_received(:request)
+  end
 end

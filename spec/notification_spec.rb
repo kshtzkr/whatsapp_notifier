@@ -30,14 +30,19 @@ RSpec.describe WhatsAppNotifier::Notification do
     expect(result).to be_success
   end
 
-  it "supports deliver_later when active job exists" do
-    stub_const("ActiveJob::Base", Class.new)
+  it "supports deliver_later" do
     expect { TestNotification.deliver_later(params: { name: "Neha" }) }.not_to raise_error
   end
 
-  it "raises for deliver_later without active job" do
-    hide_const("ActiveJob")
-    expect { TestNotification.deliver_later(params: { name: "Neha" }) }.to raise_error(LoadError)
+  it "falls back to synchronous delivery for deliver_later without active job" do
+    # No ActiveJob dependency → deliver_later runs the job synchronously.
+    result = TestNotification.deliver_later(params: { name: "Neha" })
+    expect(result).to be_success
+  end
+
+  it "supports instance-level deliver_later" do
+    result = TestNotification.with(params: { name: "Neha" }).deliver_later
+    expect(result).to be_success
   end
 
   it "raises when recipient is missing" do
