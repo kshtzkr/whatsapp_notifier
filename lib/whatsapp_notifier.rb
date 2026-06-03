@@ -62,6 +62,10 @@ module WhatsAppNotifier
       client.connection_status(provider: provider, metadata: metadata)
     end
 
+    def logout(provider: nil, metadata: {})
+      client.logout(provider: provider, metadata: metadata)
+    end
+
   end
 end
 

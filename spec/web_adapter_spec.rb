@@ -52,4 +52,16 @@ RSpec.describe WhatsAppNotifier::WebAdapter do
     expect(adapter.fetch_qr_code(metadata: {})).to be_nil
     expect { adapter.connection_status(metadata: {}) }.to raise_error(/raw-error/)
   end
+
+  it "logs out via the service" do
+    allow(Net::HTTP).to receive(:start).and_return(http_success(body: { "success" => true }))
+
+    expect(adapter.logout(metadata: { user_id: "u-1" })).to eq(success: true)
+  end
+
+  it "defaults logout success to false when the service omits it" do
+    allow(Net::HTTP).to receive(:start).and_return(http_success(body: {}))
+
+    expect(adapter.logout(metadata: {})).to eq(success: false)
+  end
 end

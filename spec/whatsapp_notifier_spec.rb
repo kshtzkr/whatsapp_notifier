@@ -93,11 +93,13 @@ RSpec.describe WhatsAppNotifier do
     allow(fake_client).to receive(:deliver_bulk).and_return(total: 0, success: 0, failed: 0, results: [])
     allow(fake_client).to receive(:scan_qr).and_return("qr-code")
     allow(fake_client).to receive(:connection_status).and_return(state: "QR_REQUIRED")
+    allow(fake_client).to receive(:logout).and_return(success: true)
     described_class.instance_variable_set(:@client, fake_client)
 
     expect(described_class.deliver_bulk([], provider: :web_automation)[:total]).to eq(0)
     expect(described_class.scan_qr(provider: :web_automation, metadata: { user_id: 1 })).to eq("qr-code")
     expect(described_class.connection_status(provider: :web_automation, metadata: { user_id: 1 })).to include(state: "QR_REQUIRED")
+    expect(described_class.logout(provider: :web_automation, metadata: { user_id: 1 })).to eq(success: true)
   end
 
 end
