@@ -3,6 +3,7 @@ import { Hono } from 'hono';
 import { rmSync, existsSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { toDataURL } from 'qrcode';
+import { newCounters, renderMetrics, isWsEndpointTimeout } from './metrics';
 
 const app = new Hono();
 const port = Number(process.env.PORT || 3001);
@@ -33,6 +34,17 @@ interface ClientData {
 
 const clients = new Map<string, ClientData>();
 const initializingClients = new Set<string>();
+
+// Prometheus counters + process start for the /metrics endpoint.
+const counters = newCounters();
+const SERVICE_START = Date.now();
+
+// Puppeteer launch hardening: the default 30s WS-endpoint wait + protocol
+// timeout are too tight when several Chromiums cold-launch at once under memory
+// pressure, producing "WS endpoint URL" / "Runtime.evaluate timed out" crash
+// loops. Raise both (env-overridable).
+const BROWSER_LAUNCH_TIMEOUT_MS = Number(process.env.WHATSAPP_BROWSER_TIMEOUT_MS || 60000);
+const PROTOCOL_TIMEOUT_MS = Number(process.env.WHATSAPP_PROTOCOL_TIMEOUT_MS || 120000);
 
 function clearInitTimer(clientData: ClientData) {
     if (clientData.initTimer) {
@@ -147,6 +159,8 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
         }),
         puppeteer: {
             headless: true,
+            timeout: BROWSER_LAUNCH_TIMEOUT_MS,
+            protocolTimeout: PROTOCOL_TIMEOUT_MS,
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
@@ -175,6 +189,7 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
     // poll spins a fresh attempt instead of wedging in INITIALIZING forever.
     clientData.initTimer = setTimeout(() => {
         if (clientData.state === 'INITIALIZING' && !clientData.qr && !clientData.ready) {
+            counters.init_timeouts_total += 1;
             console.error(`User ${userId} stuck INITIALIZING > ${INIT_TIMEOUT_MS}ms — recycling`);
             destroyClient(userId).catch(console.error);
         }
@@ -210,18 +225,23 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
         clientData.state = 'DISCONNECTED';
         clientData.ready = false;
         clearInitTimer(clientData);
+        counters.auth_failures_total += 1;
         console.error(`AUTHENTICATION FAILURE for User ${userId}`, msg);
     });
 
     client.on('disconnected', (reason) => {
         clientData.state = 'DISCONNECTED';
         clientData.ready = false;
+        counters.disconnects_total += 1;
         console.log(`User ${userId} was logged out`, reason);
         destroyClient(userId).catch(console.error);
     });
 
     client.initialize().catch(async (err) => {
-        console.error(`Initialization failed for user ${userId}:`, err.message || err);
+        const message = err?.message || String(err);
+        counters.init_failures_total += 1;
+        if (isWsEndpointTimeout(message)) counters.ws_endpoint_timeouts_total += 1;
+        console.error(`Initialization failed for user ${userId}:`, message);
         clearInitTimer(clientData);
         // Clean up the failed client
         try { client.removeAllListeners(); } catch (_) {}
@@ -283,6 +303,17 @@ setInterval(() => {
 }, 60 * 60 * 1000); // Check every hour
 
 // API Routes
+
+// Prometheus scrape endpoint (Grafana Alloy reads this over localhost). Exposes
+// per-user session state + crash counters so we can alert on the recurring
+// failure modes (init crash-loop, AUTHENTICATED-but-not-ready wedge, etc.).
+app.get('/metrics', (c) => {
+    const uptimeSeconds = Math.floor((Date.now() - SERVICE_START) / 1000);
+    return new Response(renderMetrics(clients, counters, uptimeSeconds), {
+        headers: { 'Content-Type': 'text/plain; version=0.0.4; charset=utf-8' },
+    });
+});
+
 app.get('/status/:userId', async (c) => {
     const userId = c.req.param('userId');
     const data = await getOrCreateClient(userId);
