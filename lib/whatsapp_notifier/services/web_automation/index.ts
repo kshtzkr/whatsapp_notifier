@@ -4,6 +4,7 @@ import { rmSync, existsSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { toDataURL } from 'qrcode';
 import { newCounters, renderMetrics, isWsEndpointTimeout } from './metrics';
+import { InitGate } from './init_gate';
 
 const app = new Hono();
 const port = Number(process.env.PORT || 3001);
@@ -30,6 +31,7 @@ interface ClientData {
     isDestroying?: boolean;
     ready?: boolean;
     initTimer?: ReturnType<typeof setTimeout>;
+    releaseInitSlot?: () => void;
 }
 
 const clients = new Map<string, ClientData>();
@@ -38,6 +40,10 @@ const initializingClients = new Set<string>();
 // Prometheus counters + process start for the /metrics endpoint.
 const counters = newCounters();
 const SERVICE_START = Date.now();
+
+// Cap concurrent Chromium launches (see init_gate.ts) so a herd of cold starts
+// can't exhaust RAM/CPU. Env-overridable.
+const initGate = new InitGate(Number(process.env.WHATSAPP_MAX_CONCURRENT_INITS || 3));
 
 // Puppeteer launch hardening: the default 30s WS-endpoint wait + protocol
 // timeout are too tight when several Chromiums cold-launch at once under memory
@@ -50,6 +56,10 @@ function clearInitTimer(clientData: ClientData) {
     if (clientData.initTimer) {
         clearTimeout(clientData.initTimer);
         clientData.initTimer = undefined;
+    }
+    // Free the launch slot (idempotent) once the client makes progress or ends.
+    if (clientData.releaseInitSlot) {
+        clientData.releaseInitSlot();
     }
 }
 
@@ -185,16 +195,6 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
 
     clients.set(userId, clientData);
 
-    // Watchdog: if the client never reaches QR/READY, recycle it so the next
-    // poll spins a fresh attempt instead of wedging in INITIALIZING forever.
-    clientData.initTimer = setTimeout(() => {
-        if (clientData.state === 'INITIALIZING' && !clientData.qr && !clientData.ready) {
-            counters.init_timeouts_total += 1;
-            console.error(`User ${userId} stuck INITIALIZING > ${INIT_TIMEOUT_MS}ms — recycling`);
-            destroyClient(userId).catch(console.error);
-        }
-    }, INIT_TIMEOUT_MS);
-
     client.on('qr', async (qr) => {
         clientData.state = 'QR_REQUIRED';
         clearInitTimer(clientData); // progress made — QR is showable
@@ -237,23 +237,49 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
         destroyClient(userId).catch(console.error);
     });
 
-    client.initialize().catch(async (err) => {
-        const message = err?.message || String(err);
-        counters.init_failures_total += 1;
-        if (isWsEndpointTimeout(message)) counters.ws_endpoint_timeouts_total += 1;
-        console.error(`Initialization failed for user ${userId}:`, message);
-        clearInitTimer(clientData);
-        // Clean up the failed client
-        try { client.removeAllListeners(); } catch (_) {}
-        try { await client.destroy(); } catch (_) {}
-        clients.delete(userId);
-        initializingClients.delete(userId);
+    // Gate the Chromium launch: cap concurrent initialize() calls so a herd of
+    // cold starts (e.g. every operator reconnecting after a reboot) can't
+    // exhaust RAM/CPU and crash-loop on "WS endpoint URL" timeouts. Queued
+    // clients launch as slots free; the slot is released (idempotently, via
+    // clearInitTimer) the moment the client makes progress or fails.
+    initGate.acquire().then((release) => {
+        clientData.releaseInitSlot = release;
 
-        // Auto-retry once after a cooldown
-        console.log(`Will retry initialization for user ${userId} in 10s...`);
-        setTimeout(() => {
-            getOrCreateClient(userId).catch(console.error);
-        }, 10000);
+        // Recycled/destroyed while waiting in the queue — free the slot and bail
+        // (never initialize a client that's no longer the live one for this user).
+        if (clientData.isDestroying || clients.get(userId) !== clientData) {
+            release();
+            return;
+        }
+
+        // Watchdog: recycle a client that boots Chromium but never reaches
+        // QR/READY. Armed here so it times the actual launch, not the queue wait.
+        clientData.initTimer = setTimeout(() => {
+            if (clientData.state === 'INITIALIZING' && !clientData.qr && !clientData.ready) {
+                counters.init_timeouts_total += 1;
+                console.error(`User ${userId} stuck INITIALIZING > ${INIT_TIMEOUT_MS}ms — recycling`);
+                destroyClient(userId).catch(console.error);
+            }
+        }, INIT_TIMEOUT_MS);
+
+        client.initialize().catch(async (err) => {
+            const message = err?.message || String(err);
+            counters.init_failures_total += 1;
+            if (isWsEndpointTimeout(message)) counters.ws_endpoint_timeouts_total += 1;
+            console.error(`Initialization failed for user ${userId}:`, message);
+            clearInitTimer(clientData); // also releases the init slot
+            // Clean up the failed client
+            try { client.removeAllListeners(); } catch (_) {}
+            try { await client.destroy(); } catch (_) {}
+            clients.delete(userId);
+            initializingClients.delete(userId);
+
+            // Auto-retry once after a cooldown
+            console.log(`Will retry initialization for user ${userId} in 10s...`);
+            setTimeout(() => {
+                getOrCreateClient(userId).catch(console.error);
+            }, 10000);
+        });
     });
 
     initializingClients.delete(userId);
