@@ -71,6 +71,13 @@ module WhatsAppNotifier
       end
     end
 
+    # Logs the user out of WhatsApp and clears their saved session on the service.
+    def logout(metadata: {})
+      user_id = user_id_from(metadata)
+      response = request(:post, "/logout/#{user_id}")
+      { success: response.fetch("success", false) }
+    end
+
     private
 
     def user_id_from(metadata)

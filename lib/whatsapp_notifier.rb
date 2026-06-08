@@ -66,6 +66,10 @@ module WhatsAppNotifier
       client.fetch_inbound(provider: provider, metadata: metadata)
     end
 
+    def logout(provider: nil, metadata: {})
+      client.logout(provider: provider, metadata: metadata)
+    end
+
   end
 end
 

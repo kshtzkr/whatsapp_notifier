@@ -12,7 +12,7 @@ RSpec.describe WhatsAppNotifier::Session::QrService do
     end
   end
 
-  it "does not cache and fetches a fresh qr code on each call" do
+  it "fetches a fresh qr on every call (codes expire, so no caching) and passes metadata" do
     Dir.mktmpdir do |dir|
       store = WhatsAppNotifier::Session::Store.new(path: File.join(dir, "s.json"))
       adapter = double

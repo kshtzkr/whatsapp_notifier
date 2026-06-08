@@ -136,4 +136,34 @@ RSpec.describe WhatsAppNotifier::Providers::WebAutomation do
       expect { provider.fetch_inbound }.to raise_error(WhatsAppNotifier::ConfigurationError, /inbound capture/)
     end
   end
+
+  it "logs out via adapter when enabled" do
+    Dir.mktmpdir do |dir|
+      adapter = double(fetch_qr_code: "qr", connection_status: {}, logout: { success: true })
+      config = build_config(path: File.join(dir, "session.json"), adapter: adapter)
+      provider = described_class.new(configuration: config)
+
+      expect(provider.logout(metadata: { user_id: 1 })).to eq(success: true)
+    end
+  end
+
+  it "raises on logout when provider disabled" do
+    Dir.mktmpdir do |dir|
+      adapter = double(fetch_qr_code: "qr", connection_status: {}, logout: { success: true })
+      config = build_config(path: File.join(dir, "session.json"), adapter: adapter, enabled: false)
+      provider = described_class.new(configuration: config)
+
+      expect { provider.logout }.to raise_error(WhatsAppNotifier::ConfigurationError, /disabled/)
+    end
+  end
+
+  it "raises for missing adapter logout method" do
+    Dir.mktmpdir do |dir|
+      adapter = Object.new
+      config = build_config(path: File.join(dir, "session.json"), adapter: adapter)
+      provider = described_class.new(configuration: config)
+
+      expect { provider.logout }.to raise_error(WhatsAppNotifier::ConfigurationError, /web_adapter/)
+    end
+  end
 end

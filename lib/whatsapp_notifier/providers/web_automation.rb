@@ -61,6 +61,15 @@ module WhatsAppNotifier
         adapter.fetch_inbound(metadata: metadata)
       end
 
+      def logout(metadata: {})
+        raise ConfigurationError, "web automation provider is disabled" unless configuration.web_automation_enabled
+
+        adapter = configuration.web_adapter
+        raise ConfigurationError, "web_adapter must be configured for web_automation provider" unless adapter.respond_to?(:logout)
+
+        adapter.logout(metadata: metadata)
+      end
+
 
       private
 

@@ -31,6 +31,10 @@ module WhatsAppNotifier
       provider_for(provider || @configuration.provider).fetch_inbound(metadata: metadata)
     end
 
+    def logout(metadata: {}, provider: nil)
+      provider_for(provider || @configuration.provider).logout(metadata: metadata)
+    end
+
     private
 
     def provider_for(key)

@@ -22,6 +22,16 @@ module WhatsAppNotifier
              status: :internal_server_error
     end
 
+    # DELETE /logout — disconnect WhatsApp and clear the saved session for the
+    # current user. Explicit, user-initiated; app sign-out must NOT call this.
+    def destroy
+      WhatsAppNotifier.logout(metadata: metadata)
+      render json: { success: true }
+    rescue StandardError => e
+      render json: { error: "Failed to log out: #{e.message}" },
+             status: :internal_server_error
+    end
+
     private
 
     def metadata
