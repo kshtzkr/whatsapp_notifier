@@ -169,6 +169,18 @@ export async function backfillTargets(
     }
 }
 
+// Forget one user's buffered inbound + cached target allowlist. POST /logout
+// calls this after wiping the session dir: messages captured between the last
+// poll and the logout belong to the OLD pairing, and the gated GET /inbound
+// (unpaired → [] without draining) would otherwise hold them in memory until
+// the same userId re-pairs — then replay them into the WRONG pairing. The
+// allowlist cache must go too, or loadTargets would resurrect targets whose
+// on-disk file the logout just deleted.
+export function clearInbound(userId: string) {
+    inboundQueues.delete(userId);
+    outboundTargets.delete(userId);
+}
+
 // Test helper: wipe in-memory state between examples.
 export function resetInboundState() {
     inboundQueues.clear();

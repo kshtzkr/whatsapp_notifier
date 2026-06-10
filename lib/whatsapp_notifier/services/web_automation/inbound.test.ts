@@ -12,6 +12,7 @@ import {
     backfillTargets,
     enqueueInbound,
     drainInbound,
+    clearInbound,
     shouldCapture,
     normalizeInbound,
     resetInboundState,
@@ -93,6 +94,36 @@ test('queue is bounded to INBOUND_QUEUE_CAP (drops oldest)', () => {
     expect(drained.length).toBe(INBOUND_QUEUE_CAP);
     expect(drained[0].body).toBe('5');                       // 0-4 dropped
     expect(drained[drained.length - 1].body).toBe(String(INBOUND_QUEUE_CAP + 4));
+});
+
+// G13 — logout must not strand the queue (would replay into the WRONG pairing)
+test('clearInbound empties the queue so a re-pair cannot replay old messages', () => {
+    enqueueInbound('lo1', normalizeInbound(msg()));
+    enqueueInbound('lo1', normalizeInbound(msg({ id: { _serialized: 'm2' } })));
+    enqueueInbound('lo2', normalizeInbound(msg({ id: { _serialized: 'other-user' } })));
+
+    clearInbound('lo1');
+
+    expect(drainInbound('lo1')).toEqual([]);     // logout dropped the backlog
+    expect(drainInbound('lo2').length).toBe(1);  // scoped per user
+
+    // Re-pair: only messages captured AFTER the logout surface.
+    enqueueInbound('lo1', normalizeInbound(msg({ id: { _serialized: 'fresh' }, body: 'fresh' })));
+    const replayed = drainInbound('lo1');
+    expect(replayed.length).toBe(1);
+    expect(replayed[0].body).toBe('fresh');
+});
+
+test('clearInbound drops the cached allowlist so a wiped session dir is not resurrected', () => {
+    rememberTarget('lo3', CUST);
+    expect(loadTargets('lo3').has(CUST)).toBe(true);
+
+    // Logout wipes the session dir (incl. outbound_targets.json) from disk...
+    rmSync(dirFor('lo3'), { recursive: true, force: true });
+    // ...but without clearInbound the in-memory cache would still serve CUST.
+    clearInbound('lo3');
+
+    expect(loadTargets('lo3').size).toBe(0);
 });
 
 // @lid alias joins the allowlist so backfill can re-open privacy-number chats

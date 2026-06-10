@@ -20,6 +20,7 @@ import {
     backfillTargets,
     enqueueInbound,
     drainInbound,
+    clearInbound,
     shouldCapture,
     normalizeInbound
 } from './inbound';
@@ -504,6 +505,11 @@ app.post('/logout/:userId', async (c) => {
     const userId = c.req.param('userId');
     console.log(`Logout requested for User: ${userId}`);
     await destroyClient(userId, true);
+    // Drop the not-yet-polled inbound queue + cached target allowlist. The
+    // gated GET /inbound answers [] for unpaired users WITHOUT draining, so
+    // anything captured between the last poll and this logout would sit in
+    // memory and replay into the WRONG pairing if this userId pairs again.
+    clearInbound(userId);
     initializingClients.delete(userId);
     return c.json({ success: true });
 });
