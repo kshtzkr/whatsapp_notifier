@@ -2,7 +2,7 @@ import { test, expect, describe, afterAll } from 'bun:test';
 import { mkdtempSync, mkdirSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { hasPairedSession, InitRetryLimiter } from './sessions';
+import { hasPairedSession, InitRetryLimiter, reapLimitMs } from './sessions';
 
 const root = mkdtempSync(join(tmpdir(), 'wa-sessions-'));
 const dirFor = (userId: string) => join(root, `session-user-${userId}`);
@@ -32,6 +32,25 @@ describe('hasPairedSession', () => {
         expect(hasPairedSession('paired', clients, dirFor)).toBe(true);
         expect(hasPairedSession('live', clients, dirFor)).toBe(true);
         expect(hasPairedSession('other', clients, dirFor)).toBe(false);
+    });
+});
+
+describe('reapLimitMs', () => {
+    const READY = 72 * 60 * 60 * 1000;
+    const UNREADY = 30 * 60 * 1000;
+
+    test('ready clients keep the long limit', () => {
+        expect(reapLimitMs({ ready: true, state: 'AUTHENTICATED' }, READY, UNREADY)).toBe(READY);
+    });
+
+    test('INITIALIZING clients are left to the init watchdog (long limit)', () => {
+        expect(reapLimitMs({ ready: false, state: 'INITIALIZING' }, READY, UNREADY)).toBe(READY);
+    });
+
+    test('non-ready zombies get the short limit', () => {
+        expect(reapLimitMs({ ready: false, state: 'QR_REQUIRED' }, READY, UNREADY)).toBe(UNREADY);
+        expect(reapLimitMs({ state: 'AUTHENTICATED' }, READY, UNREADY)).toBe(UNREADY); // never hydrated
+        expect(reapLimitMs({ ready: false, state: 'DISCONNECTED' }, READY, UNREADY)).toBe(UNREADY);
     });
 });
 

@@ -21,6 +21,21 @@ export function hasPairedSession(
     return liveClients.has(userId) || existsSync(sessionDirFor(userId));
 }
 
+// Idle limit the cleanup sweep applies to a client. Ready clients earn the
+// long limit; everything else (QR_REQUIRED zombies, wedged AUTHENTICATED-but-
+// never-ready, DISCONNECTED stragglers) gets the short one — an abandoned
+// pairing screen must not hold a full Chromium for 3 days. INITIALIZING is
+// excluded from the short limit because the init watchdog/init gate own that
+// phase: a client can sit in the launch queue legitimately.
+export function reapLimitMs(
+    client: { ready?: boolean; state: string },
+    readyLimitMs: number,
+    unreadyLimitMs: number
+): number {
+    if (client.ready || client.state === 'INITIALIZING') return readyLimitMs;
+    return unreadyLimitMs;
+}
+
 // Per-user budget for re-running client.initialize() after a failure.
 // Unbounded retries turn one persistently-broken session into an infinite
 // Chromium relaunch loop. The budget resets when the client reaches 'ready'
