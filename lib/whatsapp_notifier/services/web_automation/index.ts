@@ -83,6 +83,9 @@ async function captureInbound(userId: string, msg: any) {
             } catch (e) {
                 console.error(`lid->phone resolve failed for ${userId}`, e);
             }
+            // Still an @lid => no phone to match or scope by. Drop it rather than
+            // forward an unmatchable, unpurgeable plaintext body.
+            if (inbound.from.endsWith('@lid')) return;
         }
         enqueueInbound(userId, inbound);
         pushWebhook(userId, inbound);
@@ -92,26 +95,19 @@ async function captureInbound(userId: string, msg: any) {
 }
 
 async function backfillInbound(userId: string, client: Client) {
-    // On reconnect, replay recent messages from recent 1:1 chats so a disconnect
-    // window doesn't silently drop replies. getChats() returns [] for a few
-    // seconds right after 'ready' (chat list still syncing), so retry until it
-    // populates. captureInbound filters to real inbound 1:1; the host dedupes
-    // on message_id. (Was gated on the per-send allowlist, which was unreliable.)
-    try {
-        let chats: any[] = [];
-        for (let i = 0; i < 10; i++) {
-            chats = await client.getChats();
-            if (chats.length > 0) break;
-            await new Promise((r) => setTimeout(r, 2000));
-        }
-        const dms = chats.filter((c: any) => !c.isGroup);
-        for (const chat of dms.slice(0, 100)) {
-            try {
-                const msgs = await chat.fetchMessages({ limit: 20 });
-                for (const m of msgs) captureInbound(userId, m);
-            } catch (_) { /* chat not materialized yet → skip */ }
-        }
-    } catch (_) { /* getChats unavailable → skip backfill */ }
+    // On reconnect, replay recent messages ONLY from chats we actually messaged
+    // (the per-send allowlist) so a disconnect window doesn't drop a reply —
+    // without scraping every personal conversation on the linked number. Live
+    // replies are covered by the message_create handler; this is just recovery.
+    const targets = loadTargets(userId);
+    if (targets.size === 0) return;
+    for (const chatId of targets) {
+        try {
+            const chat = await client.getChatById(chatId);
+            const msgs = await chat.fetchMessages({ limit: 20 });
+            for (const m of msgs) captureInbound(userId, m);
+        } catch (_) { /* chat not materialized yet → skip */ }
+    }
 }
 
 function clearInitTimer(clientData: ClientData) {
@@ -286,7 +282,10 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
     // is the reliable event (fires for all messages). shouldCapture drops our
     // own sends (fromMe) + groups/status, and the queue dedupes on message_id,
     // so listening on both is safe.
-    client.on('message', (msg) => captureInbound(userId, msg));
+    // Only 'message_create' — it fires reliably for every message across linked/
+    // multi-device sessions (plain 'message' silently never fires on some), and
+    // listening on both would double-enqueue every reply. shouldCapture drops
+    // our own sends (fromMe).
     client.on('message_create', (msg) => captureInbound(userId, msg));
 
     client.on('authenticated', () => {

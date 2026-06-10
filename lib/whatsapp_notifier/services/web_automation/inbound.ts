@@ -3,12 +3,12 @@
 // Pure, testable logic for the two-way layer. Kept separate from index.ts so
 // it can be unit-tested without booting a whatsapp-web.js Client.
 //
-// Policy: surface ONLY replies from people this user messaged first. Every
-// /send records the recipient in a per-user allowlist (persisted to disk so it
-// survives restarts). The 'message' handler drops anything not on the allowlist
-// — plus groups (@g.us), status broadcasts, and our own messages. Captured
-// messages buffer in an in-memory queue drained by GET /inbound/:userId
-// (at-least-once delivery; the Rails side dedupes on messageId).
+// Policy: surface real inbound 1:1 messages (phone @c.us or privacy-id @lid)
+// — dropping our own messages, groups (@g.us), status broadcasts, and non-text
+// system events (e2e_notification, call_log, revoked, …) that carry no real
+// reply. Captured messages buffer in an in-memory queue drained by GET
+// /inbound/:userId (at-least-once; the host dedupes on messageId and decides
+// relevance by matching the resolved phone to its own recipient records).
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
@@ -85,11 +85,19 @@ export function drainInbound(userId: string): InboundMsg[] {
 // @lid). Drops own messages, groups (@g.us) and status (@broadcast). The host
 // app decides relevance by matching the resolved phone to its own records, so
 // we no longer gate on the per-send allowlist (which was unreliable).
+// Real human/content message types. Anything else (e2e_notification,
+// notification_template, call_log, revoked, protocol, gp2, …) is a system event
+// with no body and must NOT be surfaced as a reply.
+const TEXTUAL_TYPES = new Set([
+    'chat', 'image', 'video', 'audio', 'ptt', 'document', 'sticker', 'location', 'vcard'
+]);
+
 export function shouldCapture(userId: string, msg: any): boolean {
     if (!msg || msg.fromMe) return false;
     const from: string = msg.from || '';
     if (!from.endsWith('@c.us') && !from.endsWith('@lid')) return false;
     if (msg.isStatus) return false;
+    if (msg.type && !TEXTUAL_TYPES.has(msg.type)) return false; // drop system events
     return true;
 }
 

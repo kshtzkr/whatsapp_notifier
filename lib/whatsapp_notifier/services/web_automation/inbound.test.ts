@@ -46,10 +46,14 @@ test('shouldCapture: any inbound 1:1 chat, no allowlist gate', () => {
     expect(shouldCapture('1', msg())).toBe(true);                         // @c.us 1:1
     expect(shouldCapture('1', msg({ from: '125417440686124@lid' }))).toBe(true); // @lid 1:1
 
+    expect(shouldCapture('1', msg({ type: 'image' }))).toBe(true);        // media is real content
+
     expect(shouldCapture('1', msg({ fromMe: true }))).toBe(false);       // own message
     expect(shouldCapture('1', msg({ from: '12@g.us' }))).toBe(false);     // group
     expect(shouldCapture('1', msg({ isStatus: true }))).toBe(false);      // status
     expect(shouldCapture('1', msg({ from: 'status@broadcast' }))).toBe(false);
+    expect(shouldCapture('1', msg({ type: 'e2e_notification' }))).toBe(false); // system event
+    expect(shouldCapture('1', msg({ type: 'call_log' }))).toBe(false);        // system event
     expect(shouldCapture('1', null)).toBe(false);                         // junk
 });
 
