@@ -20,3 +20,34 @@ export function hasPairedSession(
 ): boolean {
     return liveClients.has(userId) || existsSync(sessionDirFor(userId));
 }
+
+// Per-user budget for re-running client.initialize() after a failure.
+// Unbounded retries turn one persistently-broken session into an infinite
+// Chromium relaunch loop. The budget resets when the client reaches 'ready'
+// or is explicitly destroyed, so a later, user-triggered pairing attempt
+// starts fresh.
+export class InitRetryLimiter {
+    private readonly counts = new Map<string, number>();
+
+    constructor(private readonly maxRetries: number) {}
+
+    // Consume one retry. True while the user still has budget; false (and the
+    // counter clears, ready for a future fresh cycle) once it is spent.
+    shouldRetry(userId: string): boolean {
+        const attempts = (this.counts.get(userId) || 0) + 1;
+        if (attempts > this.maxRetries) {
+            this.counts.delete(userId);
+            return false;
+        }
+        this.counts.set(userId, attempts);
+        return true;
+    }
+
+    attemptsFor(userId: string): number {
+        return this.counts.get(userId) || 0;
+    }
+
+    reset(userId: string) {
+        this.counts.delete(userId);
+    }
+}

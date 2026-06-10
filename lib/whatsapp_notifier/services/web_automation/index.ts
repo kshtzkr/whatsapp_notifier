@@ -5,7 +5,7 @@ import { join } from 'path';
 import { toDataURL } from 'qrcode';
 import { newCounters, renderMetrics, isWsEndpointTimeout, healthSnapshot } from './metrics';
 import { InitGate } from './init_gate';
-import { hasPairedSession } from './sessions';
+import { hasPairedSession, InitRetryLimiter } from './sessions';
 import {
     InboundMsg,
     configureInbound,
@@ -48,6 +48,11 @@ interface ClientData {
 
 const clients = new Map<string, ClientData>();
 const initializingClients = new Set<string>();
+
+// Bound the post-failure initialize() retries (the old "retry once" comment
+// lied: it rescheduled forever). Budget resets on 'ready' and on destroy.
+const MAX_INIT_RETRIES = 2;
+const initRetries = new InitRetryLimiter(MAX_INIT_RETRIES);
 
 // ── Inbound capture — core logic lives in ./inbound.ts ──
 // Resolves customer replies (incl. newer @lid privacy-ids) and buffers them for
@@ -287,6 +292,7 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
         clientData.qr = null;
         clientData.ready = true;
         clearInitTimer(clientData);
+        initRetries.reset(userId);
         console.log(`Client is READY for User ${userId}`);
         // Replay anything that arrived while we were disconnected.
         backfillInbound(userId, client).catch((e) => console.error(`Backfill failed for ${userId}`, e));
@@ -358,9 +364,21 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
             clients.delete(userId);
             initializingClients.delete(userId);
 
-            // Auto-retry once after a cooldown
-            console.log(`Will retry initialization for user ${userId} in 10s...`);
+            // Auto-retry after a cooldown — bounded per user, because an
+            // unbounded loop relaunches Chromium forever on a broken session.
+            if (!initRetries.shouldRetry(userId)) {
+                console.error(`Giving up on user ${userId} after ${MAX_INIT_RETRIES} failed init retries`);
+                return;
+            }
+            console.log(`Will retry initialization for user ${userId} in 10s (retry ${initRetries.attemptsFor(userId)}/${MAX_INIT_RETRIES})...`);
             setTimeout(() => {
+                // A pending retry must not resurrect a user who logged out in
+                // the meantime (POST /logout wipes the session dir): that
+                // client would go straight to a QR zombie.
+                if (!existsSync(sessionDirForUser(userId))) {
+                    console.log(`Skipping init retry for user ${userId} — session dir is gone (logged out)`);
+                    return;
+                }
                 getOrCreateClient(userId).catch(console.error);
             }, 10000);
         });
@@ -372,6 +390,7 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
 
 async function destroyClient(userId: string, clearSession: boolean = false) {
     const data = clients.get(userId);
+    initRetries.reset(userId);
     if (data && !data.isDestroying) {
         data.isDestroying = true;
         clearInitTimer(data);
