@@ -25,7 +25,9 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - name: Install service deps
         working-directory: lib/whatsapp_notifier/services/web_automation
-        run: bun install
+        # --ignore-scripts: the tests are pure logic (no browser); skip
+        # puppeteer's ~500MB Chromium download so CI is fast + can't hang on it.
+        run: bun install --frozen-lockfile --ignore-scripts
       - name: Bun service tests (inbound capture, init gate, metrics)
         working-directory: lib/whatsapp_notifier/services/web_automation
         run: bun test
