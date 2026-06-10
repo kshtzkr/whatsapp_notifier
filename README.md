@@ -148,11 +148,18 @@ those have a fully hydrated WhatsApp Web store. Prometheus metrics live at
 
 - This gem uses WhatsApp Web automation. Use responsibly and follow WhatsApp policies.
 - Keep Chromium available in your runtime (or set `PUPPETEER_EXECUTABLE_PATH`).
-- Session profiles persist under `WHATSAPP_SESSION_DIR` (default `/whatsapp_data`).
-  Mount it on durable storage so logins survive restarts; the service clears stale
-  Chromium `SingletonLock` files on each launch so an unclean exit can't wedge it.
+- Session profiles persist under `WHATSAPP_SESSION_DIR`. Careful: the
+  `whatsapp_notifier service` CLI launcher defaults it to
+  `./tmp/whatsapp_notifier/.wwebjs_auth` **relative to the current working
+  directory** (only the bare Bun service falls back to `/whatsapp_data`).
+  Production must set `WHATSAPP_SESSION_DIR` explicitly to a durable mount
+  (e.g. `/whatsapp_data`) so logins survive restarts and redeploys; the
+  service clears stale Chromium `SingletonLock` files on each launch so an
+  unclean exit can't wedge it.
 - Resilience knobs: `WHATSAPP_INIT_TIMEOUT_MS` (default 90000) recycles a client
-  that never reaches QR/READY; set `WWEBJS_WEB_VERSION` (e.g. `2.3000.1023204887`,
+  that never reaches QR/READY; `WHATSAPP_UNREADY_REAP_MS` (default 1800000)
+  destroys non-ready clients idle that long (abandoned pairing screens) while
+  keeping their on-disk session; set `WWEBJS_WEB_VERSION` (e.g. `2.3000.1023204887`,
   optionally `WWEBJS_WEB_VERSION_CACHE_URL`) to pin the WhatsApp Web build so a
   live web.whatsapp.com change can't silently break the client.
 
