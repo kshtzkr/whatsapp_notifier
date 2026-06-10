@@ -80,14 +80,17 @@ export function drainInbound(userId: string): InboundMsg[] {
     return q;
 }
 
-// The allowlist + sanity filter. Returns true only for a real inbound reply
-// from a 1:1 chat we previously messaged.
+// Sanity filter for a real inbound 1:1 reply. Accepts both phone-number chats
+// (@c.us) and privacy-id chats (@lid — newer WhatsApp delivers replies from an
+// @lid). Drops own messages, groups (@g.us) and status (@broadcast). The host
+// app decides relevance by matching the resolved phone to its own records, so
+// we no longer gate on the per-send allowlist (which was unreliable).
 export function shouldCapture(userId: string, msg: any): boolean {
     if (!msg || msg.fromMe) return false;
     const from: string = msg.from || '';
-    if (!from.endsWith('@c.us')) return false;   // drop groups (@g.us) + status (@broadcast)
+    if (!from.endsWith('@c.us') && !from.endsWith('@lid')) return false;
     if (msg.isStatus) return false;
-    return loadTargets(userId).has(from);          // only people we messaged first
+    return true;
 }
 
 export function normalizeInbound(msg: any): InboundMsg {

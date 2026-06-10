@@ -41,24 +41,16 @@ function msg(overrides: any = {}) {
     };
 }
 
-// G10 — allowlist + sanity filter
-test('shouldCapture: only allowlisted 1:1 chats', () => {
-    expect(shouldCapture('1', msg())).toBe(false); // not yet on allowlist
-
-    rememberTarget('1', CUST);
-    expect(shouldCapture('1', msg())).toBe(true);
+// G10 — sanity filter (captures any real inbound 1:1; host matches relevance)
+test('shouldCapture: any inbound 1:1 chat, no allowlist gate', () => {
+    expect(shouldCapture('1', msg())).toBe(true);                         // @c.us 1:1
+    expect(shouldCapture('1', msg({ from: '125417440686124@lid' }))).toBe(true); // @lid 1:1
 
     expect(shouldCapture('1', msg({ fromMe: true }))).toBe(false);       // own message
     expect(shouldCapture('1', msg({ from: '12@g.us' }))).toBe(false);     // group
     expect(shouldCapture('1', msg({ isStatus: true }))).toBe(false);      // status
     expect(shouldCapture('1', msg({ from: 'status@broadcast' }))).toBe(false);
     expect(shouldCapture('1', null)).toBe(false);                         // junk
-});
-
-test('allowlist is isolated per user', () => {
-    rememberTarget('1', CUST);
-    expect(shouldCapture('1', msg())).toBe(true);
-    expect(shouldCapture('2', msg())).toBe(false); // user 2 never messaged them
 });
 
 // allowlist persists to disk + reloads

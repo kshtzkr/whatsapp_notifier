@@ -67,11 +67,23 @@ async function pushWebhook(userId: string, msg: InboundMsg) {
     }
 }
 
-// Wrapper: allowlist/sanity filter → normalize → enqueue → optional webhook.
-function captureInbound(userId: string, msg: any) {
+// Wrapper: sanity filter → normalize → resolve @lid → enqueue → optional webhook.
+async function captureInbound(userId: string, msg: any) {
     try {
         if (!shouldCapture(userId, msg)) return;
         const inbound = normalizeInbound(msg);
+        // Newer WhatsApp delivers the reply's `from` as an @lid privacy id with
+        // no phone number, which the host can't match. Resolve it to the real
+        // phone via the contact so callers always get a phone-number @c.us.
+        if (inbound.from.endsWith('@lid')) {
+            try {
+                const contact = await msg.getContact();
+                const num = contact && (contact.number || (contact.id && contact.id.user));
+                if (num) inbound.from = `${String(num).replace(/\D/g, '')}@c.us`;
+            } catch (e) {
+                console.error(`lid->phone resolve failed for ${userId}`, e);
+            }
+        }
         enqueueInbound(userId, inbound);
         pushWebhook(userId, inbound);
     } catch (e) {
@@ -80,15 +92,26 @@ function captureInbound(userId: string, msg: any) {
 }
 
 async function backfillInbound(userId: string, client: Client) {
-    // On reconnect, replay recent messages from allowlisted chats so a
-    // disconnect window doesn't silently drop replies. Rails dedupes.
-    for (const chatId of loadTargets(userId)) {
-        try {
-            const chat = await client.getChatById(chatId);
-            const msgs = await chat.fetchMessages({ limit: 20 });
-            for (const m of msgs) captureInbound(userId, m);
-        } catch (_) { /* chat not materialized yet → skip */ }
-    }
+    // On reconnect, replay recent messages from recent 1:1 chats so a disconnect
+    // window doesn't silently drop replies. getChats() returns [] for a few
+    // seconds right after 'ready' (chat list still syncing), so retry until it
+    // populates. captureInbound filters to real inbound 1:1; the host dedupes
+    // on message_id. (Was gated on the per-send allowlist, which was unreliable.)
+    try {
+        let chats: any[] = [];
+        for (let i = 0; i < 10; i++) {
+            chats = await client.getChats();
+            if (chats.length > 0) break;
+            await new Promise((r) => setTimeout(r, 2000));
+        }
+        const dms = chats.filter((c: any) => !c.isGroup);
+        for (const chat of dms.slice(0, 100)) {
+            try {
+                const msgs = await chat.fetchMessages({ limit: 20 });
+                for (const m of msgs) captureInbound(userId, m);
+            } catch (_) { /* chat not materialized yet → skip */ }
+        }
+    } catch (_) { /* getChats unavailable → skip backfill */ }
 }
 
 function clearInitTimer(clientData: ClientData) {
@@ -258,8 +281,13 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
         backfillInbound(userId, client).catch((e) => console.error(`Backfill failed for ${userId}`, e));
     });
 
-    // Capture inbound replies (filtered to people this user messaged first).
+    // Capture inbound replies. 'message' fires for incoming only, but in some
+    // linked/multi-device sessions it silently never fires — 'message_create'
+    // is the reliable event (fires for all messages). shouldCapture drops our
+    // own sends (fromMe) + groups/status, and the queue dedupes on message_id,
+    // so listening on both is safe.
     client.on('message', (msg) => captureInbound(userId, msg));
+    client.on('message_create', (msg) => captureInbound(userId, msg));
 
     client.on('authenticated', () => {
         clientData.state = 'AUTHENTICATED';
