@@ -2,7 +2,13 @@ import { test, expect, describe, afterAll } from 'bun:test';
 import { mkdtempSync, mkdirSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { hasPairedSession, InitRetryLimiter, reapLimitMs } from './sessions';
+import {
+    hasPairedSession,
+    InitRetryLimiter,
+    reapLimitMs,
+    touchClient,
+    shouldWipeSessionOnReap
+} from './sessions';
 
 const root = mkdtempSync(join(tmpdir(), 'wa-sessions-'));
 const dirFor = (userId: string) => join(root, `session-user-${userId}`);
@@ -51,6 +57,40 @@ describe('reapLimitMs', () => {
         expect(reapLimitMs({ ready: false, state: 'QR_REQUIRED' }, READY, UNREADY)).toBe(UNREADY);
         expect(reapLimitMs({ state: 'AUTHENTICATED' }, READY, UNREADY)).toBe(UNREADY); // never hydrated
         expect(reapLimitMs({ ready: false, state: 'DISCONNECTED' }, READY, UNREADY)).toBe(UNREADY);
+    });
+});
+
+describe('touchClient', () => {
+    test('refreshes lastUsed for a ready client', () => {
+        const client = { ready: true, lastUsed: 1000 };
+        touchClient(client);
+        expect(client.lastUsed).toBeGreaterThan(1000);
+    });
+
+    test('does NOT refresh lastUsed for an unready client (must stay idle for the reaper)', () => {
+        const zombie = { ready: false, lastUsed: 1000 };
+        touchClient(zombie);
+        expect(zombie.lastUsed).toBe(1000);
+
+        const neverHydrated: { ready?: boolean; lastUsed: number } = { lastUsed: 1000 };
+        touchClient(neverHydrated);
+        expect(neverHydrated.lastUsed).toBe(1000);
+    });
+});
+
+describe('shouldWipeSessionOnReap', () => {
+    test('never-authenticated unready zombie → wipe (dir holds no credentials)', () => {
+        expect(shouldWipeSessionOnReap({ ready: false })).toBe(true);
+        expect(shouldWipeSessionOnReap({ ready: false, everAuthenticated: false })).toBe(true);
+    });
+
+    test('authenticated-but-not-ready wedge → keep dir (session must survive the reap)', () => {
+        expect(shouldWipeSessionOnReap({ ready: false, everAuthenticated: true })).toBe(false);
+    });
+
+    test('ready client → keep dir', () => {
+        expect(shouldWipeSessionOnReap({ ready: true, everAuthenticated: true })).toBe(false);
+        expect(shouldWipeSessionOnReap({ ready: true })).toBe(false); // defensive: flag unset
     });
 });
 

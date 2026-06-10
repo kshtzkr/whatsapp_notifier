@@ -158,8 +158,11 @@ those have a fully hydrated WhatsApp Web store. Prometheus metrics live at
   unclean exit can't wedge it.
 - Resilience knobs: `WHATSAPP_INIT_TIMEOUT_MS` (default 90000) recycles a client
   that never reaches QR/READY; `WHATSAPP_UNREADY_REAP_MS` (default 1800000)
-  destroys non-ready clients idle that long (abandoned pairing screens) while
-  keeping their on-disk session; set `WWEBJS_WEB_VERSION` (e.g. `2.3000.1023204887`,
+  destroys non-ready clients idle that long (abandoned pairing screens) —
+  sessions that authenticated at least once keep their on-disk dir for
+  reconnect, while a pairing that never authenticated has its credential-less
+  dir removed too, so it cannot pass the paired-session gate later; set
+  `WWEBJS_WEB_VERSION` (e.g. `2.3000.1023204887`,
   optionally `WWEBJS_WEB_VERSION_CACHE_URL`) to pin the WhatsApp Web build so a
   live web.whatsapp.com change can't silently break the client.
 

@@ -21,6 +21,29 @@ export function hasPairedSession(
     return liveClients.has(userId) || existsSync(sessionDirFor(userId));
 }
 
+// Refresh a client's idle clock on access — but ONLY once it is ready.
+// LocalAuth mkdirs the session dir on the very first initialize() (before any
+// QR scan), so one abandoned pairing visit makes hasPairedSession true and
+// lets /send traffic through to a QR_REQUIRED zombie. If that traffic also
+// bumped lastUsed, the zombie would never look idle and the unready reap
+// limit could never elapse — so unready clients must NOT be touched here.
+export function touchClient(client: { ready?: boolean; lastUsed: number }): void {
+    if (client.ready) client.lastUsed = Date.now();
+}
+
+// Whether reaping this client should also remove its on-disk session dir.
+// A non-ready client that NEVER authenticated is an abandoned pairing visit:
+// its LocalAuth dir holds an empty Chromium profile and no credentials, and
+// leaving it on disk flips hasPairedSession true forever — defeating the
+// fast-reject gate for every future /send by this user. A client that DID
+// authenticate at some point keeps its dir, so a wedge-reap (e.g.
+// AUTHENTICATED-but-never-ready) can still reconnect without a new QR.
+export function shouldWipeSessionOnReap(
+    client: { ready?: boolean; everAuthenticated?: boolean }
+): boolean {
+    return !client.ready && !client.everAuthenticated;
+}
+
 // Idle limit the cleanup sweep applies to a client. Ready clients earn the
 // long limit; everything else (QR_REQUIRED zombies, wedged AUTHENTICATED-but-
 // never-ready, DISCONNECTED stragglers) gets the short one — an abandoned

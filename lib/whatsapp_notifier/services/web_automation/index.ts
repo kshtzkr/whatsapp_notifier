@@ -5,7 +5,13 @@ import { join } from 'path';
 import { toDataURL } from 'qrcode';
 import { newCounters, renderMetrics, isWsEndpointTimeout, healthSnapshot } from './metrics';
 import { InitGate } from './init_gate';
-import { hasPairedSession, InitRetryLimiter, reapLimitMs } from './sessions';
+import {
+    hasPairedSession,
+    InitRetryLimiter,
+    reapLimitMs,
+    touchClient,
+    shouldWipeSessionOnReap
+} from './sessions';
 import {
     InboundMsg,
     configureInbound,
@@ -42,6 +48,10 @@ interface ClientData {
     lastUsed: number;
     isDestroying?: boolean;
     ready?: boolean;
+    // True once the 'authenticated' event has ever fired for this client.
+    // Distinguishes a real (possibly wedged) session from an abandoned
+    // pairing visit whose LocalAuth dir holds no credentials at all.
+    everAuthenticated?: boolean;
     initTimer?: ReturnType<typeof setTimeout>;
     releaseInitSlot?: () => void;
 }
@@ -229,7 +239,10 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
     if (clients.has(userId)) {
         const data = clients.get(userId)!;
         if (data.isDestroying) return data;
-        data.lastUsed = Date.now();
+        // Only READY clients earn a lastUsed refresh (see touchClient): an
+        // unready client must keep looking idle so the reaper can collect it
+        // even while /send or /status traffic keeps hitting it.
+        touchClient(data);
         return data;
     }
 
@@ -307,6 +320,7 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
     client.on('authenticated', () => {
         clientData.state = 'AUTHENTICATED';
         clientData.ready = false;
+        clientData.everAuthenticated = true;
         clearInitTimer(clientData);
         console.log(`AUTHENTICATED for User ${userId}`);
     });
@@ -420,9 +434,13 @@ async function destroyClient(userId: string, clearSession: boolean = false) {
 
 // Hourly cleanup sweep. Ready clients are reaped after 72h idle; non-ready
 // clients (e.g. a QR_REQUIRED zombie left by an abandoned pairing screen)
-// after 30 min — they must not hold a full Chromium for 3 days, and nothing
-// else ever recycles them because every /send refreshes lastUsed. Destroying
-// keeps the on-disk session, so a half-paired user can simply retry the QR.
+// after 30 min — they must not hold a full Chromium for 3 days, and only
+// ready clients refresh lastUsed on access (see touchClient), so a zombie
+// looks idle no matter how much /send traffic hits it. When the reaped
+// client NEVER authenticated, its (credential-less) session dir is removed
+// too — otherwise the leftover LocalAuth dir keeps hasPairedSession true and
+// defeats the fast-reject gate forever. Ever-authenticated sessions stay on
+// disk so a wedge-reaped user reconnects without a new QR.
 const STAGNATION_LIMIT = 72 * 60 * 60 * 1000; // 72 hours
 const UNREADY_REAP_MS = Number(process.env.WHATSAPP_UNREADY_REAP_MS || 1800000); // 30 min
 
@@ -432,8 +450,9 @@ setInterval(() => {
     for (const [userId, data] of clients.entries()) {
         const limit = reapLimitMs(data, STAGNATION_LIMIT, UNREADY_REAP_MS);
         if (now - data.lastUsed > limit) {
-            console.log(`Auto-cleaning ${data.ready ? 'stagnant' : 'unready'} session for User: ${userId}`);
-            destroyClient(userId).catch(console.error);
+            const wipe = shouldWipeSessionOnReap(data);
+            console.log(`Auto-cleaning ${data.ready ? 'stagnant' : 'unready'} session for User: ${userId}${wipe ? ' (never authenticated — removing session dir)' : ''}`);
+            destroyClient(userId, wipe).catch(console.error);
         }
     }
 }, 60 * 60 * 1000); // Check every hour
