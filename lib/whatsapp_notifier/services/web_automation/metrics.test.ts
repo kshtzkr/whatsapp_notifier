@@ -3,6 +3,7 @@ import {
     newCounters,
     renderMetrics,
     isWsEndpointTimeout,
+    healthSnapshot,
     type Counters,
     type MetricClient,
 } from './metrics';
@@ -93,5 +94,21 @@ describe('renderMetrics', () => {
         const out = renderMetrics(clients, newCounters(), 1);
 
         expect(out).toContain('whatsapp_client_state{user_id="a\\"b\\\\c",state="DISCONNECTED"} 1');
+    });
+});
+
+describe('healthSnapshot', () => {
+    test('empty service: ok with zero sessions', () => {
+        expect(healthSnapshot(new Map(), 0)).toEqual({ ok: true, uptime_s: 0, sessions: 0, ready: 0 });
+    });
+
+    test('counts ready clients out of all in-memory sessions', () => {
+        const clients = new Map<string, MetricClient>([
+            ['1', { state: 'AUTHENTICATED', qr: null, ready: true }],
+            ['2', { state: 'QR_REQUIRED', qr: 'data:image/png;base64,xxx', ready: false }],
+            ['3', { state: 'INITIALIZING', qr: null }],
+        ]);
+
+        expect(healthSnapshot(clients, 123)).toEqual({ ok: true, uptime_s: 123, sessions: 3, ready: 1 });
     });
 });

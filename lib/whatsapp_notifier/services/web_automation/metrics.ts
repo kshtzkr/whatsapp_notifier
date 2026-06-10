@@ -41,6 +41,17 @@ export function isWsEndpointTimeout(message: string): boolean {
         message.includes('Runtime.evaluate timed out');
 }
 
+// Cheap JSON body for GET /health: reads only the in-memory clients map —
+// never creates or touches a client — so load balancer / Azure probes can hit
+// it every few seconds without side effects.
+export function healthSnapshot(clients: ReadonlyMap<string, MetricClient>, uptimeSeconds: number) {
+    let ready = 0;
+    for (const data of clients.values()) {
+        if (data.ready) ready += 1;
+    }
+    return { ok: true as const, uptime_s: uptimeSeconds, sessions: clients.size, ready };
+}
+
 function escapeLabel(value: string): string {
     return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
 }

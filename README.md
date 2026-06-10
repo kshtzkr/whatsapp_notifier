@@ -130,6 +130,20 @@ rails generate whatsapp_notifier:install_service
 
 This copies the service to `whatsapp_service/` and updates `.gitignore`.
 
+## Service health probe
+
+The Bun service exposes `GET /health` for load balancer / platform probes
+(Azure, Kubernetes, uptime checks). It reads only in-memory state — it never
+creates a WhatsApp client — so it is safe to poll every few seconds:
+
+```json
+{ "ok": true, "uptime_s": 4242, "sessions": 3, "ready": 2 }
+```
+
+`sessions` is the number of clients held in memory; `ready` is how many of
+those have a fully hydrated WhatsApp Web store. Prometheus metrics live at
+`GET /metrics`.
+
 ## Notes
 
 - This gem uses WhatsApp Web automation. Use responsibly and follow WhatsApp policies.

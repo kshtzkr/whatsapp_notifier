@@ -3,7 +3,7 @@ import { Hono } from 'hono';
 import { rmSync, existsSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { toDataURL } from 'qrcode';
-import { newCounters, renderMetrics, isWsEndpointTimeout } from './metrics';
+import { newCounters, renderMetrics, isWsEndpointTimeout, healthSnapshot } from './metrics';
 import { InitGate } from './init_gate';
 import { hasPairedSession } from './sessions';
 import {
@@ -422,6 +422,14 @@ app.get('/metrics', (c) => {
     return new Response(renderMetrics(clients, counters, uptimeSeconds), {
         headers: { 'Content-Type': 'text/plain; version=0.0.4; charset=utf-8' },
     });
+});
+
+// Liveness probe. The old service had no health route, so platform probes
+// (Azure) 404'd and falsely reported the service down. Must stay side-effect
+// free: never call getOrCreateClient here.
+app.get('/health', (c) => {
+    const uptimeSeconds = Math.floor((Date.now() - SERVICE_START) / 1000);
+    return c.json(healthSnapshot(clients, uptimeSeconds));
 });
 
 app.get('/status/:userId', async (c) => {
