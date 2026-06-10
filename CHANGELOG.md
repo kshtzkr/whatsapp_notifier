@@ -32,7 +32,22 @@ does not).
   no more infinite relaunch loops or post-logout QR zombies.
 - Non-ready clients idle longer than 30 minutes are reaped
   (`WHATSAPP_UNREADY_REAP_MS`, default 1800000); ready clients keep the 72h
-  rule. The on-disk session survives, so a half-paired user can retry the QR.
+  rule. The cleanup sweep runs every 5 minutes (a cheap O(clients) scan), so
+  reaping lands within ~5 minutes of the limit instead of the 30-90 min an
+  hourly sweep allowed.
+- Abandoned pairing visits can no longer defeat the fast-reject gate:
+  LocalAuth creates the session dir on the first `initialize()` — before any
+  QR scan — so a single abandoned `GET /qr` used to mark the user paired
+  forever. Now only ready clients refresh `lastUsed` on access (a QR zombie
+  looks idle no matter how much `/send` traffic hits it), and reaping a
+  client that never authenticated also removes its credential-less session
+  dir. Sessions that authenticated at least once keep their dir, so a
+  wedge-reaped user reconnects without a new QR.
+- `POST /logout` also clears the user's buffered inbound replies and cached
+  outbound-target allowlist: the gated `GET /inbound` answers empty for
+  unpaired users without draining, so messages captured between the last poll
+  and the logout would otherwise sit in memory and replay into the wrong
+  pairing if the same userId paired again.
 - Prometheus `GET /metrics`, the bounded init gate
   (`WHATSAPP_MAX_CONCURRENT_INITS`) and the INITIALIZING watchdog
   (`WHATSAPP_INIT_TIMEOUT_MS`) are included with the vendored service.
