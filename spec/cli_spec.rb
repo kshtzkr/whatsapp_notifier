@@ -40,8 +40,16 @@ RSpec.describe WhatsAppNotifier::CLI do
 
     def run_service(argv = [])
       allow(WhatsAppNotifier).to receive(:service_path).and_return(service_dir)
-      allow_any_instance_of(described_class).to receive(:system).and_return(true)
-      allow_any_instance_of(described_class).to receive(:exec)
+      # Stub system/exec on the instance Thor builds (not via any_instance_of:
+      # that defines the methods on the class, which Thor's method_added hook
+      # then registers as commands and warns about). Wrapping .new keeps
+      # Thor's own option parsing (--port) intact.
+      allow(described_class).to receive(:new).and_wrap_original do |original, *args|
+        original.call(*args).tap do |cli|
+          allow(cli).to receive(:system).and_return(true)
+          allow(cli).to receive(:exec)
+        end
+      end
 
       expect do
         described_class.start(["service", *argv])
