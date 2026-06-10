@@ -9,12 +9,10 @@ module WhatsAppNotifier
       end
 
       def qr_code(metadata: {})
-        generated = adapter.fetch_qr_code(metadata: metadata)
-        # We don't cache the QR code because it expires every ~20 seconds
-        # The underlying adapter/service is responsible for providing the latest one
-        generated
+        # We don't cache the QR code because it expires every ~20 seconds.
+        # The underlying adapter/service provides the latest one each call.
+        adapter.fetch_qr_code(metadata: metadata)
       end
-
 
       def activate!(token)
         session = store.load

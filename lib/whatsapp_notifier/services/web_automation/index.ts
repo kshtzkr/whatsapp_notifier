@@ -3,6 +3,16 @@ import { Hono } from 'hono';
 import { rmSync, existsSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { toDataURL } from 'qrcode';
+import {
+    InboundMsg,
+    configureInbound,
+    loadTargets,
+    rememberTarget,
+    enqueueInbound,
+    drainInbound,
+    shouldCapture,
+    normalizeInbound
+} from './inbound';
 
 const app = new Hono();
 const port = Number(process.env.PORT || 3001);
@@ -33,6 +43,72 @@ interface ClientData {
 
 const clients = new Map<string, ClientData>();
 const initializingClients = new Set<string>();
+
+// ── Inbound capture (v0.4.0) — core logic lives in ./inbound.ts ──
+const WEBHOOK_URL = process.env.WHATSAPP_WEBHOOK_URL;
+const WEBHOOK_TOKEN = process.env.WHATSAPP_WEBHOOK_TOKEN;
+
+// Tell the inbound core how to resolve each user's on-disk session dir.
+configureInbound(sessionDirForUser);
+
+async function pushWebhook(userId: string, msg: InboundMsg) {
+    if (!WEBHOOK_URL) return;
+    try {
+        await fetch(WEBHOOK_URL, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                ...(WEBHOOK_TOKEN ? { 'X-WA-Token': WEBHOOK_TOKEN } : {})
+            },
+            body: JSON.stringify({ userId, message: msg })
+        });
+    } catch (e) {
+        console.error(`Webhook push failed for ${userId}`, e);
+    }
+}
+
+// Wrapper: sanity filter → normalize → resolve @lid → enqueue → optional webhook.
+async function captureInbound(userId: string, msg: any) {
+    try {
+        if (!shouldCapture(userId, msg)) return;
+        const inbound = normalizeInbound(msg);
+        // Newer WhatsApp delivers the reply's `from` as an @lid privacy id with
+        // no phone number, which the host can't match. Resolve it to the real
+        // phone via the contact so callers always get a phone-number @c.us.
+        if (inbound.from.endsWith('@lid')) {
+            try {
+                const contact = await msg.getContact();
+                const num = contact && (contact.number || (contact.id && contact.id.user));
+                if (num) inbound.from = `${String(num).replace(/\D/g, '')}@c.us`;
+            } catch (e) {
+                console.error(`lid->phone resolve failed for ${userId}`, e);
+            }
+            // Still an @lid => no phone to match or scope by. Drop it rather than
+            // forward an unmatchable, unpurgeable plaintext body.
+            if (inbound.from.endsWith('@lid')) return;
+        }
+        enqueueInbound(userId, inbound);
+        pushWebhook(userId, inbound);
+    } catch (e) {
+        console.error(`captureInbound error for ${userId}`, e);
+    }
+}
+
+async function backfillInbound(userId: string, client: Client) {
+    // On reconnect, replay recent messages ONLY from chats we actually messaged
+    // (the per-send allowlist) so a disconnect window doesn't drop a reply —
+    // without scraping every personal conversation on the linked number. Live
+    // replies are covered by the message_create handler; this is just recovery.
+    const targets = loadTargets(userId);
+    if (targets.size === 0) return;
+    for (const chatId of targets) {
+        try {
+            const chat = await client.getChatById(chatId);
+            const msgs = await chat.fetchMessages({ limit: 20 });
+            for (const m of msgs) captureInbound(userId, m);
+        } catch (_) { /* chat not materialized yet → skip */ }
+    }
+}
 
 function clearInitTimer(clientData: ClientData) {
     if (clientData.initTimer) {
@@ -197,7 +273,20 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
         clientData.ready = true;
         clearInitTimer(clientData);
         console.log(`Client is READY for User ${userId}`);
+        // Replay anything that arrived while we were disconnected.
+        backfillInbound(userId, client).catch((e) => console.error(`Backfill failed for ${userId}`, e));
     });
+
+    // Capture inbound replies. 'message' fires for incoming only, but in some
+    // linked/multi-device sessions it silently never fires — 'message_create'
+    // is the reliable event (fires for all messages). shouldCapture drops our
+    // own sends (fromMe) + groups/status, and the queue dedupes on message_id,
+    // so listening on both is safe.
+    // Only 'message_create' — it fires reliably for every message across linked/
+    // multi-device sessions (plain 'message' silently never fires on some), and
+    // listening on both would double-enqueue every reply. shouldCapture drops
+    // our own sends (fromMe).
+    client.on('message_create', (msg) => captureInbound(userId, msg));
 
     client.on('authenticated', () => {
         clientData.state = 'AUTHENTICATED';
@@ -326,12 +415,24 @@ app.post('/send/:userId', async (c) => {
         const chatId = to.includes('@c.us') ? to : `${to}@c.us`;
         await sendMessageWithRetry(data.client, data, chatId, message, mediaUrl);
 
+        // Record the recipient so their replies pass the inbound allowlist.
+        rememberTarget(userId, chatId);
+
         data.lastUsed = Date.now();
         return c.json({ success: true });
     } catch (error: any) {
         console.error(`Send error for user ${userId}:`, error);
         return c.json({ success: false, error: error.message }, 500);
     }
+});
+
+// GET /inbound/:userId — drain the user's pending inbound queue.
+// Returns { messages: [...] } and clears the buffer (at-least-once;
+// the Rails side dedupes on messageId).
+app.get('/inbound/:userId', async (c) => {
+    const userId = c.req.param('userId');
+    await getOrCreateClient(userId);
+    return c.json({ messages: drainInbound(userId) });
 });
 
 

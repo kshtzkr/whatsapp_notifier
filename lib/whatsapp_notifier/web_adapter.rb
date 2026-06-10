@@ -52,6 +52,25 @@ module WhatsAppNotifier
       }
     end
 
+    # Drains the service's pending inbound queue for this user. The service
+    # returns the messages once, then clears them (at-least-once handoff —
+    # callers must dedupe on message_id). Accepts either a bare array or a
+    # { "messages" => [...] } envelope so the wire format can evolve.
+    def fetch_inbound(metadata: {})
+      user_id = user_id_from(metadata)
+      response = request(:get, "/inbound/#{user_id}")
+      raw = response.is_a?(Hash) ? response["messages"] : response
+      Array(raw).map do |m|
+        {
+          from: m["from"],
+          body: m["body"],
+          message_id: m["messageId"] || m["message_id"],
+          timestamp: m["timestamp"],
+          type: m["type"]
+        }
+      end
+    end
+
     # Logs the user out of WhatsApp and clears their saved session on the service.
     def logout(metadata: {})
       user_id = user_id_from(metadata)
