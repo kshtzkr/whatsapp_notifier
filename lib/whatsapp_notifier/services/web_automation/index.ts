@@ -432,8 +432,11 @@ async function destroyClient(userId: string, clearSession: boolean = false) {
     }
 }
 
-// Hourly cleanup sweep. Ready clients are reaped after 72h idle; non-ready
-// clients (e.g. a QR_REQUIRED zombie left by an abandoned pairing screen)
+// Cleanup sweep, every 5 minutes — a cheap O(clients) scan. The old hourly
+// sweep made the 30-min unready limit really 30-90 min depending on where the
+// idle window fell; 5-minute granularity keeps it at 30-35 min worst case.
+// Ready clients are reaped after 72h idle; non-ready clients
+// (e.g. a QR_REQUIRED zombie left by an abandoned pairing screen)
 // after 30 min — they must not hold a full Chromium for 3 days, and only
 // ready clients refresh lastUsed on access (see touchClient), so a zombie
 // looks idle no matter how much /send traffic hits it. When the reaped
@@ -443,6 +446,7 @@ async function destroyClient(userId: string, clearSession: boolean = false) {
 // disk so a wedge-reaped user reconnects without a new QR.
 const STAGNATION_LIMIT = 72 * 60 * 60 * 1000; // 72 hours
 const UNREADY_REAP_MS = Number(process.env.WHATSAPP_UNREADY_REAP_MS || 1800000); // 30 min
+const SWEEP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
 setInterval(() => {
     const now = Date.now();
@@ -455,7 +459,7 @@ setInterval(() => {
             destroyClient(userId, wipe).catch(console.error);
         }
     }
-}, 60 * 60 * 1000); // Check every hour
+}, SWEEP_INTERVAL_MS);
 
 // API Routes
 
