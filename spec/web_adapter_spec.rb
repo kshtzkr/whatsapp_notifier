@@ -112,6 +112,17 @@ RSpec.describe WhatsAppNotifier::WebAdapter do
     expect(adapter.logout(metadata: {})).to eq(success: false)
   end
 
+  # The "default" session for metadata without a user_id is documented public
+  # API (README: "omit metadata for a default shared session") — pin it.
+  it "falls back to the shared 'default' user when metadata has no user_id" do
+    allow(Net::HTTP::Get).to receive(:new).and_call_original
+    allow(Net::HTTP).to receive(:start).and_return(http_success(body: { "qr" => "data:image/png;base64,qr" }))
+
+    adapter.fetch_qr_code(metadata: {})
+
+    expect(Net::HTTP::Get).to have_received(:new).with("/qr/default")
+  end
+
   it "executes the request inside the Net::HTTP block" do
     fake_http = instance_double(Net::HTTP)
     allow(fake_http).to receive(:request).and_return(http_success(body: { "qr" => "data:image/png;base64,x" }))
