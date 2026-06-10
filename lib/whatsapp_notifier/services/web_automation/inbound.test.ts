@@ -7,11 +7,15 @@ import {
     configureInbound,
     loadTargets,
     rememberTarget,
+    rememberLidAlias,
+    resolveChat,
+    backfillTargets,
     enqueueInbound,
     drainInbound,
     shouldCapture,
     normalizeInbound,
-    resetInboundState
+    resetInboundState,
+    type ChatResolver
 } from './inbound';
 
 const root = mkdtempSync(join(tmpdir(), 'wa-inbound-'));
@@ -89,6 +93,82 @@ test('queue is bounded to INBOUND_QUEUE_CAP (drops oldest)', () => {
     expect(drained.length).toBe(INBOUND_QUEUE_CAP);
     expect(drained[0].body).toBe('5');                       // 0-4 dropped
     expect(drained[drained.length - 1].body).toBe(String(INBOUND_QUEUE_CAP + 4));
+});
+
+// @lid alias joins the allowlist so backfill can re-open privacy-number chats
+test('rememberLidAlias stores the @lid chat id for a known target', () => {
+    const LID = '125417440686124@lid';
+    rememberTarget('la1', CUST);
+
+    rememberLidAlias('la1', LID, CUST);
+
+    expect(loadTargets('la1').has(LID)).toBe(true);
+    expect(loadTargets('la1').has(CUST)).toBe(true);
+});
+
+test('rememberLidAlias ignores unknown senders and non-@lid raw ids', () => {
+    rememberTarget('la2', CUST);
+
+    rememberLidAlias('la2', '999@lid', '918888000000@c.us'); // resolved not a target
+    rememberLidAlias('la2', CUST, CUST);                     // raw is already @c.us
+
+    expect(loadTargets('la2')).toEqual(new Set([CUST]));
+});
+
+// backfill resolves chats directly, then via contact, and skips dead targets
+function fakeChat(msgs: any[]) {
+    return { fetchMessages: async (_opts: { limit: number }) => msgs };
+}
+
+test('backfillTargets replays direct chats and falls back to the contact for @lid', async () => {
+    const LID = '125417440686124@lid';
+    rememberTarget('bf1', CUST);
+    rememberTarget('bf1', LID);
+    rememberTarget('bf1', 'gone@c.us');
+
+    const client: ChatResolver = {
+        async getChatById(chatId: string) {
+            if (chatId === CUST) return fakeChat([msg({ body: 'direct' })]);
+            throw new Error('chat not found'); // @lid + stale ids fail here
+        },
+        async getContactById(chatId: string) {
+            if (chatId === LID) return { getChat: async () => fakeChat([msg({ from: LID, body: 'via-contact' })]) };
+            throw new Error('contact not found');
+        }
+    };
+
+    const captured: string[] = [];
+    await backfillTargets('bf1', client, (_userId, m) => { captured.push(m.body); });
+
+    expect(captured.sort()).toEqual(['direct', 'via-contact']);
+});
+
+test('backfillTargets survives a chat whose fetchMessages blows up', async () => {
+    rememberTarget('bf2', CUST);
+    rememberTarget('bf2', '918888000000@c.us');
+
+    const client: ChatResolver = {
+        async getChatById(chatId: string) {
+            if (chatId === CUST) return { fetchMessages: async () => { throw new Error('boom'); } };
+            return fakeChat([msg({ body: 'ok' })]);
+        },
+        async getContactById(_chatId: string) {
+            throw new Error('unused');
+        }
+    };
+
+    const captured: string[] = [];
+    await backfillTargets('bf2', client, (_userId, m) => { captured.push(m.body); });
+
+    expect(captured).toEqual(['ok']);
+});
+
+test('resolveChat returns null when both lookups fail', async () => {
+    const client: ChatResolver = {
+        async getChatById() { throw new Error('no chat'); },
+        async getContactById() { throw new Error('no contact'); }
+    };
+    expect(await resolveChat(client, 'x@c.us')).toBeNull();
 });
 
 // normalize shape + messageId fallback

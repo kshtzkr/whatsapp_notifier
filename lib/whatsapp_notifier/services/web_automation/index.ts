@@ -9,8 +9,9 @@ import { hasPairedSession } from './sessions';
 import {
     InboundMsg,
     configureInbound,
-    loadTargets,
     rememberTarget,
+    rememberLidAlias,
+    backfillTargets,
     enqueueInbound,
     drainInbound,
     shouldCapture,
@@ -82,6 +83,7 @@ async function captureInbound(userId: string, msg: any) {
         // no phone number, which the host can't match. Resolve it to the real
         // phone via the contact so callers always get a phone-number @c.us.
         if (inbound.from.endsWith('@lid')) {
+            const rawFrom = inbound.from;
             try {
                 const contact = await msg.getContact();
                 const num = contact && (contact.number || (contact.id && contact.id.user));
@@ -92,6 +94,9 @@ async function captureInbound(userId: string, msg: any) {
             // Still an @lid => no phone to match or scope by. Drop it rather than
             // forward an unmatchable, unpurgeable plaintext body.
             if (inbound.from.endsWith('@lid')) return;
+            // Known recipient replying from a privacy-number chat: allowlist the
+            // @lid chat id too, so the reconnect backfill can re-open this chat.
+            rememberLidAlias(userId, rawFrom, inbound.from);
         }
         enqueueInbound(userId, inbound);
         pushWebhook(userId, inbound);
@@ -105,15 +110,7 @@ async function backfillInbound(userId: string, client: Client) {
     // (the per-send allowlist) so a disconnect window doesn't drop a reply —
     // without scraping every personal conversation on the linked number. Live
     // replies are covered by the message_create handler; this is just recovery.
-    const targets = loadTargets(userId);
-    if (targets.size === 0) return;
-    for (const chatId of targets) {
-        try {
-            const chat = await client.getChatById(chatId);
-            const msgs = await chat.fetchMessages({ limit: 20 });
-            for (const m of msgs) captureInbound(userId, m);
-        } catch (_) { /* chat not materialized yet → skip */ }
-    }
+    await backfillTargets(userId, client, captureInbound);
 }
 
 // Prometheus counters + process start for the /metrics endpoint.

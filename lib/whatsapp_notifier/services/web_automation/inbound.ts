@@ -53,6 +53,18 @@ export function loadTargets(userId: string): Set<string> {
     return set;
 }
 
+// After an @lid sender is resolved to a phone @c.us: if the resolved phone is
+// one of our outbound targets, remember the @lid alias too. rememberTarget at
+// send time only ever stores @c.us ids, but for privacy-number accounts the
+// *chat* is keyed by the @lid — so a reconnect backfill that replays targets
+// via chat-id lookup could never re-open that chat, permanently losing any
+// disconnect-window replies. Duplicate captures across the @c.us/@lid pair are
+// fine: the contract is at-least-once and the host dedupes on messageId.
+export function rememberLidAlias(userId: string, rawFrom: string, resolvedFrom: string) {
+    if (!rawFrom.endsWith('@lid')) return;
+    if (loadTargets(userId).has(resolvedFrom)) rememberTarget(userId, rawFrom);
+}
+
 export function rememberTarget(userId: string, chatId: string) {
     const set = loadTargets(userId);
     if (set.has(chatId)) return;
@@ -110,6 +122,51 @@ export function normalizeInbound(msg: any): InboundMsg {
         timestamp: msg.timestamp || Math.floor(Date.now() / 1000),
         type: msg.type || 'chat'
     };
+}
+
+// Minimal slice of whatsapp-web.js Client that backfill needs — a seam so the
+// replay loop can be tested without booting a real client.
+export interface ChatLike {
+    fetchMessages(opts: { limit: number }): Promise<any[]>;
+}
+
+export interface ChatResolver {
+    getChatById(chatId: string): Promise<ChatLike>;
+    getContactById(chatId: string): Promise<{ getChat(): Promise<ChatLike> }>;
+}
+
+// Resolve a target chat id, falling back to the contact: @lid-keyed chats are
+// sometimes only reachable via getContactById(...).getChat() while a plain
+// getChatById throws. Returns null when neither works (chat not materialized).
+export async function resolveChat(client: ChatResolver, chatId: string): Promise<ChatLike | null> {
+    try {
+        return await client.getChatById(chatId);
+    } catch (_) { /* fall through to the contact lookup */ }
+    try {
+        const contact = await client.getContactById(chatId);
+        return await contact.getChat();
+    } catch (_) {
+        return null;
+    }
+}
+
+// Replay recent messages from every remembered outbound target through
+// `capture`. Per-chat failures skip that chat only, so one stale target can't
+// abort recovery for the rest.
+export async function backfillTargets(
+    userId: string,
+    client: ChatResolver,
+    capture: (userId: string, msg: any) => void | Promise<void>,
+    limit = 20
+) {
+    for (const chatId of loadTargets(userId)) {
+        try {
+            const chat = await resolveChat(client, chatId);
+            if (!chat) continue;
+            const msgs = await chat.fetchMessages({ limit });
+            for (const m of msgs) await capture(userId, m);
+        } catch (_) { /* keep replaying the other chats */ }
+    }
 }
 
 // Test helper: wipe in-memory state between examples.
