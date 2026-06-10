@@ -17,3 +17,15 @@ jobs:
           ruby-version: ${{ matrix.ruby-version }}
           bundler-cache: true
       - run: bundle exec rspec
+
+  service-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install service deps
+        working-directory: lib/whatsapp_notifier/services/web_automation
+        run: bun install
+      - name: Bun service tests (inbound capture, init gate, metrics)
+        working-directory: lib/whatsapp_notifier/services/web_automation
+        run: bun test

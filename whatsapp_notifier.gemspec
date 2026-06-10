@@ -19,7 +19,18 @@ Gem::Specification.new do |spec|
   spec.metadata["bug_tracker_uri"] = "https://github.com/kshtzkr/whatsapp_notifier/issues"
   spec.metadata["rubygems_mfa_required"] = "true"
 
-  spec.files = Dir.glob("{app,config,bin,lib,docs,examples,spec}/**/*") + %w[README.md LICENSE.txt Gemfile Rakefile]
+  # Ship the Bun service SOURCE (index.ts + modules + package.json + bun.lock) but
+  # NOT its node_modules / browser caches: node_modules holds platform-native
+  # binaries (Puppeteer/Chromium) that must be rebuilt for the host OS via
+  # `bun install` at install/deploy time. Shipping macOS binaries would break the
+  # Linux container, and they bloated the gem to ~12MB.
+  spec.files = Dir.glob("{app,config,bin,lib,docs,examples,spec}/**/*").reject do |f|
+    File.directory?(f) ||
+      f.include?("/node_modules/") ||
+      f.include?("/.wwebjs") ||
+      f.include?("/.puppeteer_data") ||
+      f.end_with?("debug_screen.png")
+  end + %w[README.md LICENSE.txt Gemfile Rakefile]
   spec.executables = ["whatsapp_notifier"]
   spec.require_paths = ["lib"]
 

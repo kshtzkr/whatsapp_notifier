@@ -3,6 +3,8 @@ import { Hono } from 'hono';
 import { rmSync, existsSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { toDataURL } from 'qrcode';
+import { newCounters, renderMetrics, isWsEndpointTimeout } from './metrics';
+import { InitGate } from './init_gate';
 import {
     InboundMsg,
     configureInbound,
@@ -39,12 +41,15 @@ interface ClientData {
     isDestroying?: boolean;
     ready?: boolean;
     initTimer?: ReturnType<typeof setTimeout>;
+    releaseInitSlot?: () => void;
 }
 
 const clients = new Map<string, ClientData>();
 const initializingClients = new Set<string>();
 
-// ── Inbound capture (v0.4.0) — core logic lives in ./inbound.ts ──
+// ── Inbound capture — core logic lives in ./inbound.ts ──
+// Resolves customer replies (incl. newer @lid privacy-ids) and buffers them for
+// GET /inbound/:userId, which the Rails poller drains + matches to a campaign.
 const WEBHOOK_URL = process.env.WHATSAPP_WEBHOOK_URL;
 const WEBHOOK_TOKEN = process.env.WHATSAPP_WEBHOOK_TOKEN;
 
@@ -110,10 +115,29 @@ async function backfillInbound(userId: string, client: Client) {
     }
 }
 
+// Prometheus counters + process start for the /metrics endpoint.
+const counters = newCounters();
+const SERVICE_START = Date.now();
+
+// Cap concurrent Chromium launches (see init_gate.ts) so a herd of cold starts
+// can't exhaust RAM/CPU. Env-overridable.
+const initGate = new InitGate(Number(process.env.WHATSAPP_MAX_CONCURRENT_INITS || 3));
+
+// Puppeteer launch hardening: the default 30s WS-endpoint wait + protocol
+// timeout are too tight when several Chromiums cold-launch at once under memory
+// pressure, producing "WS endpoint URL" / "Runtime.evaluate timed out" crash
+// loops. Raise both (env-overridable).
+const BROWSER_LAUNCH_TIMEOUT_MS = Number(process.env.WHATSAPP_BROWSER_TIMEOUT_MS || 60000);
+const PROTOCOL_TIMEOUT_MS = Number(process.env.WHATSAPP_PROTOCOL_TIMEOUT_MS || 120000);
+
 function clearInitTimer(clientData: ClientData) {
     if (clientData.initTimer) {
         clearTimeout(clientData.initTimer);
         clientData.initTimer = undefined;
+    }
+    // Free the launch slot (idempotent) once the client makes progress or ends.
+    if (clientData.releaseInitSlot) {
+        clientData.releaseInitSlot();
     }
 }
 
@@ -223,6 +247,8 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
         }),
         puppeteer: {
             headless: true,
+            timeout: BROWSER_LAUNCH_TIMEOUT_MS,
+            protocolTimeout: PROTOCOL_TIMEOUT_MS,
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
@@ -247,15 +273,6 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
 
     clients.set(userId, clientData);
 
-    // Watchdog: if the client never reaches QR/READY, recycle it so the next
-    // poll spins a fresh attempt instead of wedging in INITIALIZING forever.
-    clientData.initTimer = setTimeout(() => {
-        if (clientData.state === 'INITIALIZING' && !clientData.qr && !clientData.ready) {
-            console.error(`User ${userId} stuck INITIALIZING > ${INIT_TIMEOUT_MS}ms — recycling`);
-            destroyClient(userId).catch(console.error);
-        }
-    }, INIT_TIMEOUT_MS);
-
     client.on('qr', async (qr) => {
         clientData.state = 'QR_REQUIRED';
         clearInitTimer(clientData); // progress made — QR is showable
@@ -277,15 +294,10 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
         backfillInbound(userId, client).catch((e) => console.error(`Backfill failed for ${userId}`, e));
     });
 
-    // Capture inbound replies. 'message' fires for incoming only, but in some
-    // linked/multi-device sessions it silently never fires — 'message_create'
-    // is the reliable event (fires for all messages). shouldCapture drops our
-    // own sends (fromMe) + groups/status, and the queue dedupes on message_id,
-    // so listening on both is safe.
-    // Only 'message_create' — it fires reliably for every message across linked/
-    // multi-device sessions (plain 'message' silently never fires on some), and
-    // listening on both would double-enqueue every reply. shouldCapture drops
-    // our own sends (fromMe).
+    // Capture inbound replies. Only 'message_create' — it fires reliably for
+    // every message across linked/multi-device sessions (plain 'message'
+    // silently never fires on some). shouldCapture drops our own sends (fromMe)
+    // + groups/status; the queue dedupes on message_id on the Rails side.
     client.on('message_create', (msg) => captureInbound(userId, msg));
 
     client.on('authenticated', () => {
@@ -299,30 +311,61 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
         clientData.state = 'DISCONNECTED';
         clientData.ready = false;
         clearInitTimer(clientData);
+        counters.auth_failures_total += 1;
         console.error(`AUTHENTICATION FAILURE for User ${userId}`, msg);
     });
 
     client.on('disconnected', (reason) => {
         clientData.state = 'DISCONNECTED';
         clientData.ready = false;
+        counters.disconnects_total += 1;
         console.log(`User ${userId} was logged out`, reason);
         destroyClient(userId).catch(console.error);
     });
 
-    client.initialize().catch(async (err) => {
-        console.error(`Initialization failed for user ${userId}:`, err.message || err);
-        clearInitTimer(clientData);
-        // Clean up the failed client
-        try { client.removeAllListeners(); } catch (_) {}
-        try { await client.destroy(); } catch (_) {}
-        clients.delete(userId);
-        initializingClients.delete(userId);
+    // Gate the Chromium launch: cap concurrent initialize() calls so a herd of
+    // cold starts (e.g. every operator reconnecting after a reboot) can't
+    // exhaust RAM/CPU and crash-loop on "WS endpoint URL" timeouts. Queued
+    // clients launch as slots free; the slot is released (idempotently, via
+    // clearInitTimer) the moment the client makes progress or fails.
+    initGate.acquire().then((release) => {
+        clientData.releaseInitSlot = release;
 
-        // Auto-retry once after a cooldown
-        console.log(`Will retry initialization for user ${userId} in 10s...`);
-        setTimeout(() => {
-            getOrCreateClient(userId).catch(console.error);
-        }, 10000);
+        // Recycled/destroyed while waiting in the queue — free the slot and bail
+        // (never initialize a client that's no longer the live one for this user).
+        if (clientData.isDestroying || clients.get(userId) !== clientData) {
+            release();
+            return;
+        }
+
+        // Watchdog: recycle a client that boots Chromium but never reaches
+        // QR/READY. Armed here so it times the actual launch, not the queue wait.
+        clientData.initTimer = setTimeout(() => {
+            if (clientData.state === 'INITIALIZING' && !clientData.qr && !clientData.ready) {
+                counters.init_timeouts_total += 1;
+                console.error(`User ${userId} stuck INITIALIZING > ${INIT_TIMEOUT_MS}ms — recycling`);
+                destroyClient(userId).catch(console.error);
+            }
+        }, INIT_TIMEOUT_MS);
+
+        client.initialize().catch(async (err) => {
+            const message = err?.message || String(err);
+            counters.init_failures_total += 1;
+            if (isWsEndpointTimeout(message)) counters.ws_endpoint_timeouts_total += 1;
+            console.error(`Initialization failed for user ${userId}:`, message);
+            clearInitTimer(clientData); // also releases the init slot
+            // Clean up the failed client
+            try { client.removeAllListeners(); } catch (_) {}
+            try { await client.destroy(); } catch (_) {}
+            clients.delete(userId);
+            initializingClients.delete(userId);
+
+            // Auto-retry once after a cooldown
+            console.log(`Will retry initialization for user ${userId} in 10s...`);
+            setTimeout(() => {
+                getOrCreateClient(userId).catch(console.error);
+            }, 10000);
+        });
     });
 
     initializingClients.delete(userId);
@@ -372,6 +415,17 @@ setInterval(() => {
 }, 60 * 60 * 1000); // Check every hour
 
 // API Routes
+
+// Prometheus scrape endpoint (Grafana Alloy reads this over localhost). Exposes
+// per-user session state + crash counters so we can alert on the recurring
+// failure modes (init crash-loop, AUTHENTICATED-but-not-ready wedge, etc.).
+app.get('/metrics', (c) => {
+    const uptimeSeconds = Math.floor((Date.now() - SERVICE_START) / 1000);
+    return new Response(renderMetrics(clients, counters, uptimeSeconds), {
+        headers: { 'Content-Type': 'text/plain; version=0.0.4; charset=utf-8' },
+    });
+});
+
 app.get('/status/:userId', async (c) => {
     const userId = c.req.param('userId');
     const data = await getOrCreateClient(userId);
@@ -415,7 +469,7 @@ app.post('/send/:userId', async (c) => {
         const chatId = to.includes('@c.us') ? to : `${to}@c.us`;
         await sendMessageWithRetry(data.client, data, chatId, message, mediaUrl);
 
-        // Record the recipient so their replies pass the inbound allowlist.
+        // Record the recipient so their replies survive a reconnect backfill.
         rememberTarget(userId, chatId);
 
         data.lastUsed = Date.now();
@@ -427,8 +481,8 @@ app.post('/send/:userId', async (c) => {
 });
 
 // GET /inbound/:userId — drain the user's pending inbound queue.
-// Returns { messages: [...] } and clears the buffer (at-least-once;
-// the Rails side dedupes on messageId).
+// Returns { messages: [...] } and clears the buffer (at-least-once; the Rails
+// side dedupes on messageId and matches the resolved phone to a campaign).
 app.get('/inbound/:userId', async (c) => {
     const userId = c.req.param('userId');
     await getOrCreateClient(userId);
