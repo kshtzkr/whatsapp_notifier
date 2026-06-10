@@ -5,6 +5,7 @@ import { join } from 'path';
 import { toDataURL } from 'qrcode';
 import { newCounters, renderMetrics, isWsEndpointTimeout } from './metrics';
 import { InitGate } from './init_gate';
+import { hasPairedSession } from './sessions';
 import {
     InboundMsg,
     configureInbound,
@@ -459,6 +460,12 @@ app.post('/send/:userId', async (c) => {
     if (!to || !message) {
         return c.json({ success: false, error: 'Both `to` and `message` are required' }, 422);
     }
+    // Never spawn a client just to fail the auth check below: a send for a
+    // never-paired user (e.g. a job defaulting to user "default") would
+    // otherwise boot a full Chromium that parks in QR_REQUIRED forever.
+    if (!hasPairedSession(userId, clients, sessionDirForUser)) {
+        return c.json({ success: false, error: 'No saved WhatsApp session for this user — pair via QR first' }, 401);
+    }
     const data = await getOrCreateClient(userId);
 
     if (data.state !== 'AUTHENTICATED' || !data.ready) {
@@ -485,6 +492,11 @@ app.post('/send/:userId', async (c) => {
 // side dedupes on messageId and matches the resolved phone to a campaign).
 app.get('/inbound/:userId', async (c) => {
     const userId = c.req.param('userId');
+    // A poll for a never-paired user can't have queued messages — answer empty
+    // without creating a client (same zombie-Chromium hazard as /send).
+    if (!hasPairedSession(userId, clients, sessionDirForUser)) {
+        return c.json({ messages: [] });
+    }
     await getOrCreateClient(userId);
     return c.json({ messages: drainInbound(userId) });
 });
