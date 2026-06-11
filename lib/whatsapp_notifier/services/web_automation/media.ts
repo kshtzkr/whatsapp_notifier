@@ -56,16 +56,24 @@ export type MediaPolicy = { download: true } | { download: false; reason: MediaS
 export const INLINE_MEDIA_MAX_BYTES = 16 * 1024 * 1024;
 export const MEDIA_DOWNLOAD_TIMEOUT_MS = 30000;
 
+// Malformed env values ("50GB", "2 days") parse to NaN, and every NaN
+// comparison is false — the TTL sweep and the disk cap would silently
+// disable themselves. Fall back to the default instead.
+function envLimit(name: string, fallback: number): number {
+    const parsed = Number(process.env[name] || fallback);
+    return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 export function mediaTtlMs(): number {
-    return Number(process.env.WHATSAPP_MEDIA_TTL_MS || 48 * 60 * 60 * 1000); // 48h
+    return envLimit('WHATSAPP_MEDIA_TTL_MS', 48 * 60 * 60 * 1000); // 48h
 }
 
 export function maxDocumentBytes(): number {
-    return Number(process.env.WHATSAPP_MEDIA_MAX_BYTES || 25 * 1024 * 1024); // 25MB
+    return envLimit('WHATSAPP_MEDIA_MAX_BYTES', 25 * 1024 * 1024); // 25MB
 }
 
 export function maxDiskBytes(): number {
-    return Number(process.env.WHATSAPP_MEDIA_MAX_DISK_BYTES || 5 * 1024 * 1024 * 1024); // 5GB
+    return envLimit('WHATSAPP_MEDIA_MAX_DISK_BYTES', 5 * 1024 * 1024 * 1024); // 5GB
 }
 
 // ── Root + cap accounting ──

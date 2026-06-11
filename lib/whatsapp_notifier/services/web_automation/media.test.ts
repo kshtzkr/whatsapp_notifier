@@ -277,6 +277,25 @@ test('downloadPolicy skips stickers, videos, unknown types and view-once media',
     expect(downloadPolicy('image', 10, true)).toEqual({ download: false, reason: 'unsupported_type' });
 });
 
+// Malformed env → NaN → every comparison false → sweep + cap silently off.
+test('malformed limit envs fall back to the defaults instead of NaN', () => {
+    process.env.WHATSAPP_MEDIA_TTL_MS = '2 days';
+    process.env.WHATSAPP_MEDIA_MAX_BYTES = 'garbage';
+    process.env.WHATSAPP_MEDIA_MAX_DISK_BYTES = '50GB';
+
+    expect(mediaTtlMs()).toBe(48 * 60 * 60 * 1000);
+    expect(maxDocumentBytes()).toBe(25 * 1024 * 1024);
+    expect(maxDiskBytes()).toBe(5 * 1024 * 1024 * 1024);
+
+    // The guards stay live: the document cap still rejects oversize media...
+    expect(downloadPolicy('document', 25 * 1024 * 1024 + 1))
+        .toEqual({ download: false, reason: 'too_large' });
+
+    // ...and the TTL sweep still evicts media older than the default 48h.
+    writeMedia(USER, 'old', bytes('x'), { mime: 'image/png' });
+    expect(sweepExpired(Date.now() + 48 * 60 * 60 * 1000 + 1000)).toBe(1);
+});
+
 test('downloadPolicy refuses a download that would blow the disk cap', () => {
     expect(maxDiskBytes()).toBe(5 * 1024 * 1024 * 1024);
     process.env.WHATSAPP_MEDIA_MAX_DISK_BYTES = '12';
