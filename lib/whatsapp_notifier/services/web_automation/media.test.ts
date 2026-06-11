@@ -10,6 +10,7 @@ import {
     writeMedia,
     readMedia,
     deleteMedia,
+    clearUserMedia,
     mediaExists,
     mediaDiskBytes,
     mediaTtlMs,
@@ -169,6 +170,42 @@ test('deleteMedia removes the pair, is idempotent, and rejects invalid ids', () 
 
     expect(deleteMedia(USER, MSG_ID)).toBe(true); // second delete: still fine
     expect(deleteMedia('..', MSG_ID)).toBe(false);
+});
+
+// ── clearUserMedia (logout privacy contract) ──
+
+test('clearUserMedia removes every file for the user and fixes the accounting', () => {
+    writeMedia(USER, 'm1', bytes('12345'), { mime: 'image/png' });
+    writeMedia(USER, 'm2', bytes('1234567890'), { mime: 'application/pdf', filename: 'doc.pdf' });
+    writeMedia('7', 'other', bytes('123'), { mime: 'image/png' });
+    expect(mediaDiskBytes()).toBe(18);
+
+    expect(clearUserMedia(USER)).toBe(true);
+
+    expect(mediaExists(USER, 'm1')).toBeNull();
+    expect(mediaExists(USER, 'm2')).toBeNull();
+    expect(existsSync(join(mediaRoot, USER))).toBe(false);   // dir itself gone
+    expect(mediaExists('7', 'other')).not.toBeNull();        // scoped per user
+    expect(mediaDiskBytes()).toBe(3);                        // cap accounting refreshed
+});
+
+test('clearUserMedia is idempotent and safe before any media was stored', () => {
+    expect(clearUserMedia(USER)).toBe(true);                 // nothing on disk yet
+    writeMedia(USER, 'm1', bytes('x'), { mime: 'image/png' });
+    expect(clearUserMedia(USER)).toBe(true);
+    expect(clearUserMedia(USER)).toBe(true);                 // repeat is fine
+});
+
+test('clearUserMedia refuses traversal-hostile user ids without touching the root', () => {
+    writeMedia(USER, 'm1', bytes('payload'), { mime: 'image/png' });
+
+    expect(clearUserMedia('..')).toBe(false);
+    expect(clearUserMedia('../..')).toBe(false);
+    expect(clearUserMedia('')).toBe(false);
+    expect(clearUserMedia(null as any)).toBe(false);
+
+    expect(mediaExists(USER, 'm1')).not.toBeNull();          // nothing collateral
+    expect(existsSync(mediaRoot)).toBe(true);                // root untouched
 });
 
 // ── disk accounting ──

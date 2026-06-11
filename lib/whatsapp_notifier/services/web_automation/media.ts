@@ -186,6 +186,28 @@ export function readMedia(userId: string, messageId: string): { data: Buffer; me
     }
 }
 
+// Logout privacy contract: stored media belongs to the OLD pairing. POST
+// /logout wipes the session dir and the inbound queue, but without this the
+// customer photos/documents stayed on disk — fetchable via GET /media — for
+// up to the 48h TTL after the operator severed the pairing. Same sanitize +
+// containment rules as mediaPaths; recomputing the cached disk total keeps
+// downloadPolicy's cap check honest after a bulk removal.
+export function clearUserMedia(userId: string): boolean {
+    const safeUser = sanitizeId(userId);
+    if (!safeUser) return false;
+    const root = resolve(mediaRootResolver());
+    const dir = resolve(root, safeUser);
+    if (!dir.startsWith(root + sep)) return false;
+    try {
+        rmSync(dir, { recursive: true, force: true });
+    } catch (e) {
+        console.error(`Failed to clear media dir for ${userId}`, e);
+        return false;
+    }
+    cachedDiskBytes = computeDiskBytes();
+    return true;
+}
+
 // Idempotent: deleting media that was never stored (or already swept) is fine.
 export function deleteMedia(userId: string, messageId: string): boolean {
     const paths = mediaPaths(userId, messageId);

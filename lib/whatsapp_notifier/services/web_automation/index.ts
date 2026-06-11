@@ -29,6 +29,7 @@ import {
     configureMedia,
     resolveMediaForMessage,
     sweepExpired,
+    clearUserMedia,
     mediaGetResponse,
     mediaDeleteResponse
 } from './media';
@@ -541,6 +542,11 @@ app.post('/logout/:userId', async (c) => {
     // anything captured between the last poll and this logout would sit in
     // memory and replay into the WRONG pairing if this userId pairs again.
     clearInbound(userId);
+    // Logout privacy contract: downloaded media belongs to the old pairing.
+    // Without this wipe, customer photos/documents stayed on disk (and
+    // fetchable via GET /media) for up to the 48h TTL after the operator
+    // severed the pairing.
+    clearUserMedia(userId);
     initializingClients.delete(userId);
     return c.json({ success: true });
 });
