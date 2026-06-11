@@ -84,11 +84,38 @@ test('mediaPaths lays files out under <root>/<user>/<messageId> and never escape
     const paths = mediaPaths(USER, MSG_ID)!;
     expect(paths.dir).toBe(resolve(mediaRoot, USER));
     expect(paths.dataPath).toBe(resolve(mediaRoot, USER, MSG_ID));
-    expect(paths.metaPath).toBe(`${paths.dataPath}.json`);
+    // '~' is outside the sanitize charset, so no message id can ever name a sidecar.
+    expect(paths.metaPath).toBe(`${paths.dataPath}~meta.json`);
     expect(paths.dataPath.startsWith(resolve(mediaRoot) + sep)).toBe(true);
 
     const hostile = mediaPaths('../../outside', '../../../etc/passwd')!;
     expect(hostile.dataPath.startsWith(resolve(mediaRoot) + sep)).toBe(true);
+});
+
+// Regression: a sanitized message id ending in ".json" used to land in the
+// sidecar namespace — skipped by accounting, deletable as an orphan, and able
+// to overwrite another message's sidecar.
+test('a message id ending in .json cannot collide with a sidecar', () => {
+    writeMedia(USER, 'm1', bytes('real-payload'), { mime: 'image/png' });
+    // Hostile/unlucky id: exactly the OLD sidecar name of message m1.
+    writeMedia(USER, 'm1.json', bytes('12345'), { mime: 'application/json' });
+
+    // m1's sidecar survives intact — the second write touched different files.
+    expect(mediaExists(USER, 'm1')!.mime).toBe('image/png');
+    expect(mediaExists(USER, 'm1.json')!.size).toBe(5);
+
+    // Accounting counts BOTH payloads (the .json one is data, not a sidecar).
+    expect(mediaDiskBytes()).toBe(17);
+
+    // The sweep treats it as data too: fresh → kept, not reaped as an orphan.
+    expect(sweepExpired()).toBe(0);
+    expect(mediaExists(USER, 'm1.json')).not.toBeNull();
+    expect(mediaDiskBytes()).toBe(17);
+
+    // And deleting one message never touches the other's files.
+    expect(deleteMedia(USER, 'm1')).toBe(true);
+    expect(mediaExists(USER, 'm1')).toBeNull();
+    expect(readMedia(USER, 'm1.json')!.data.toString()).toBe('12345');
 });
 
 test('mediaPaths returns null when either id fails sanitization', () => {

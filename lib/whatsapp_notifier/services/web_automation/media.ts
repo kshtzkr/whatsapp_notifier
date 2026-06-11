@@ -7,7 +7,10 @@
 // the route responses — can be unit-tested without booting Chromium.
 //
 // Layout: <media root>/<safeUser>/<safeMessageId> holds the raw bytes and
-// <safeMessageId>.json the sidecar { mime, filename, size, capturedAt }. The
+// <safeMessageId>~meta.json the sidecar { mime, filename, size, capturedAt }.
+// The '~' sits OUTSIDE the sanitize charset, so a hostile message id ending in
+// ".json" can never name-collide with (or overwrite) another message's sidecar
+// — data files and sidecars live in disjoint namespaces by construction. The
 // media root is <SESSION_DIR>/media in production (survives restarts that wipe
 // the in-memory inbound queues); tests point it at a tmp dir via
 // configureMedia, mirroring configureInbound.
@@ -91,7 +94,7 @@ function computeDiskBytes(): number {
             if (!user.isDirectory()) continue;
             const dir = join(root, user.name);
             for (const file of readdirSync(dir)) {
-                if (file.endsWith('.json')) continue; // sidecars are negligible
+                if (isSidecarName(file)) continue; // sidecars are negligible
                 try { total += statSync(join(dir, file)).size; } catch (_) { /* raced a delete */ }
             }
         }
@@ -112,6 +115,15 @@ export function sanitizeId(raw: unknown): string | null {
     return cleaned;
 }
 
+// Sidecar names end with a suffix whose '~' is outside the sanitize charset:
+// no sanitized message id can ever produce (or overwrite) a sidecar name, so
+// the accounting/sweep/orphan logic can tell the two apart by name alone.
+const SIDECAR_SUFFIX = '~meta.json';
+
+function isSidecarName(file: string): boolean {
+    return file.endsWith(SIDECAR_SUFFIX);
+}
+
 export function mediaPaths(
     userId: string,
     messageId: string
@@ -126,7 +138,7 @@ export function mediaPaths(
     // Belt and braces: even a sanitizer bug must never escape the media root.
     if (!dir.startsWith(root + sep) || !dataPath.startsWith(dir + sep)) return null;
 
-    return { dir, dataPath, metaPath: `${dataPath}.json` };
+    return { dir, dataPath, metaPath: `${dataPath}${SIDECAR_SUFFIX}` };
 }
 
 // ── Store primitives ──
@@ -255,17 +267,17 @@ export function sweepExpired(nowMs = Date.now()): number {
             if (!user.isDirectory()) continue;
             const dir = join(root, user.name);
             for (const file of readdirSync(dir)) {
-                if (file.endsWith('.json')) continue;
+                if (isSidecarName(file)) continue;
                 const dataPath = join(dir, file);
-                if (nowMs - capturedAtFor(dataPath, `${dataPath}.json`) > ttl) {
+                if (nowMs - capturedAtFor(dataPath, `${dataPath}${SIDECAR_SUFFIX}`) > ttl) {
                     rmSync(dataPath, { force: true });
-                    rmSync(`${dataPath}.json`, { force: true });
+                    rmSync(`${dataPath}${SIDECAR_SUFFIX}`, { force: true });
                     removed += 1;
                 }
             }
             // Sidecars whose payload is already gone are garbage regardless of age.
             for (const file of readdirSync(dir)) {
-                if (file.endsWith('.json') && !existsSync(join(dir, file.slice(0, -'.json'.length)))) {
+                if (isSidecarName(file) && !existsSync(join(dir, file.slice(0, -SIDECAR_SUFFIX.length)))) {
                     rmSync(join(dir, file), { force: true });
                 }
             }
