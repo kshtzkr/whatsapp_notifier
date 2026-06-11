@@ -14,6 +14,7 @@ module WhatsAppNotifier
         index.ts
         inbound.ts
         init_gate.ts
+        media.ts
         metrics.ts
         sessions.ts
         package.json

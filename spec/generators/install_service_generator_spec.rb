@@ -58,7 +58,7 @@ RSpec.describe "WhatsAppNotifier::Generators::InstallServiceGenerator" do
       generator.copy_service_files
 
       sources = generator.copied.map(&:first)
-      expect(sources).to match_array(%w[index.ts inbound.ts init_gate.ts metrics.ts sessions.ts package.json bun.lock])
+      expect(sources).to match_array(%w[index.ts inbound.ts init_gate.ts media.ts metrics.ts sessions.ts package.json bun.lock])
       expect(sources.grep(/test|node_modules|\.wwebjs|\.puppeteer/)).to be_empty
       expect(generator.copied.map(&:last)).to all(start_with("whatsapp_service/"))
     end
@@ -68,6 +68,17 @@ RSpec.describe "WhatsAppNotifier::Generators::InstallServiceGenerator" do
         expect(File).to exist(File.join(generator_class.source_root, file)),
                         "SERVICE_FILES lists #{file} but it is missing from the service dir"
       end
+    end
+
+    # An ejected service that is missing a module index.ts imports dies on
+    # boot — pin the file list to the imports so a new module (like media.ts
+    # in 0.7.0) can never be forgotten again.
+    it "ships every local module index.ts imports" do
+      index = File.read(File.join(generator_class.source_root, "index.ts"), encoding: "UTF-8")
+      local_imports = index.scan(%r{from '\./([A-Za-z0-9_]+)'}).flatten.map { |name| "#{name}.ts" }
+
+      expect(local_imports).not_to be_empty
+      expect(generator_class.const_get(:SERVICE_FILES)).to include(*local_imports)
     end
   end
 
