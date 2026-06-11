@@ -111,9 +111,12 @@ module WhatsAppNotifier
 
     # Removes the service's copy after the host has attached the bytes.
     # Idempotent on the service side: deleting absent media still succeeds.
+    # A 0.6.0 service mid-rollout has no /media routes and answers 404 —
+    # degrade to { success: false } instead of raising, mirroring
+    # fetch_media's nil-on-404.
     def delete_media(message_id:, metadata: {})
       user_id = user_id_from(metadata)
-      response = request(:delete, "/media/#{user_id}/#{path_id(message_id)}")
+      response = request(:delete, "/media/#{user_id}/#{path_id(message_id)}", allow_404: true)
       { success: response.fetch("success", false) }
     end
 
@@ -182,7 +185,7 @@ module WhatsAppNotifier
                       read_timeout: MEDIA_READ_TIMEOUT) { |http| http.request(req) }
     end
 
-    def request(method, path, body: nil)
+    def request(method, path, body: nil, allow_404: false)
       uri = URI.parse("#{@base_url}#{path}")
       req = HTTP_CLASSES.fetch(method).new(uri.request_uri)
       req["Content-Type"] = "application/json"
@@ -195,6 +198,10 @@ module WhatsAppNotifier
                             read_timeout: @read_timeout) { |http| http.request(req) }
       parsed = parse_body(res.body)
       return parsed if res.is_a?(Net::HTTPSuccess)
+      # Callers opting in treat "route/resource not there" as a soft miss
+      # (e.g. delete_media against a 0.6.0 service) — the parsed error body
+      # carries no "success" key, so they degrade rather than raise.
+      return parsed if allow_404 && res.code.to_s == "404"
 
       raise "service request failed (#{res.code}): #{parsed["error"] || res.body}"
     end

@@ -225,6 +225,23 @@ RSpec.describe WhatsAppNotifier::WebAdapter do
     expect(adapter.delete_media(message_id: "m1", metadata: {})).to eq(success: false)
   end
 
+  # A 0.6.0 service mid-rollout has no /media routes — delete must degrade
+  # like fetch_media's nil-on-404, not raise.
+  it "returns success false when delete_media hits a 404" do
+    allow(Net::HTTP).to receive(:start)
+      .and_return(http_failure(code: "404", body: JSON.generate({ error: "not_found" })))
+
+    expect(adapter.delete_media(message_id: "m1", metadata: {})).to eq(success: false)
+  end
+
+  it "still raises when delete_media fails with a non-404 code" do
+    allow(Net::HTTP).to receive(:start)
+      .and_return(http_failure(code: "500", body: JSON.generate({ error: "boom" })))
+
+    expect { adapter.delete_media(message_id: "m1", metadata: {}) }
+      .to raise_error(/service request failed \(500\)/)
+  end
+
   it "logs out via the service" do
     allow(Net::HTTP).to receive(:start).and_return(http_success(body: { "success" => true }))
 
