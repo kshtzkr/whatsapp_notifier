@@ -130,15 +130,41 @@ rails generate whatsapp_notifier:install_service
 
 This copies the service to `whatsapp_service/` and updates `.gitignore`.
 
+## Service health probe
+
+The Bun service exposes `GET /health` for load balancer / platform probes
+(Azure, Kubernetes, uptime checks). It reads only in-memory state — it never
+creates a WhatsApp client — so it is safe to poll every few seconds:
+
+```json
+{ "ok": true, "uptime_s": 4242, "sessions": 3, "ready": 2 }
+```
+
+`sessions` is the number of clients held in memory; `ready` is how many of
+those have a fully hydrated WhatsApp Web store. Prometheus metrics live at
+`GET /metrics`.
+
 ## Notes
 
 - This gem uses WhatsApp Web automation. Use responsibly and follow WhatsApp policies.
 - Keep Chromium available in your runtime (or set `PUPPETEER_EXECUTABLE_PATH`).
-- Session profiles persist under `WHATSAPP_SESSION_DIR` (default `/whatsapp_data`).
-  Mount it on durable storage so logins survive restarts; the service clears stale
-  Chromium `SingletonLock` files on each launch so an unclean exit can't wedge it.
+- Session profiles persist under `WHATSAPP_SESSION_DIR`. Careful: the
+  `whatsapp_notifier service` CLI launcher defaults it to
+  `./tmp/whatsapp_notifier/.wwebjs_auth` **relative to the current working
+  directory** (only the bare Bun service falls back to `/whatsapp_data`).
+  Production must set `WHATSAPP_SESSION_DIR` explicitly to a durable mount
+  (e.g. `/whatsapp_data`) so logins survive restarts and redeploys; the
+  service clears stale Chromium `SingletonLock` files on each launch so an
+  unclean exit can't wedge it.
 - Resilience knobs: `WHATSAPP_INIT_TIMEOUT_MS` (default 90000) recycles a client
-  that never reaches QR/READY; set `WWEBJS_WEB_VERSION` (e.g. `2.3000.1023204887`,
+  that never reaches QR/READY; `WHATSAPP_UNREADY_REAP_MS` (default 1800000)
+  destroys non-ready clients idle that long (abandoned pairing screens; the
+  cleanup sweep runs every 5 minutes, so reaping lands within ~5 minutes of
+  the limit) —
+  sessions that authenticated at least once keep their on-disk dir for
+  reconnect, while a pairing that never authenticated has its credential-less
+  dir removed too, so it cannot pass the paired-session gate later; set
+  `WWEBJS_WEB_VERSION` (e.g. `2.3000.1023204887`,
   optionally `WWEBJS_WEB_VERSION_CACHE_URL`) to pin the WhatsApp Web build so a
   live web.whatsapp.com change can't silently break the client.
 
