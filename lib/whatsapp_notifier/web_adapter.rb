@@ -163,12 +163,21 @@ module WhatsAppNotifier
       token.empty? ? nil : token
     end
 
+    # Net::HTTP does NOT infer TLS from the URL scheme — without an explicit
+    # use_ssl a https:// service URL would silently speak plaintext to port
+    # 443. Both request paths (JSON control plane + binary media fetch) must
+    # honor the scheme.
+    def use_ssl?(uri)
+      uri.scheme == "https"
+    end
+
     def binary_get(path)
       uri = URI.parse("#{@base_url}#{path}")
       req = Net::HTTP::Get.new(uri.request_uri)
       req["X-WA-Token"] = webhook_token if webhook_token
 
       Net::HTTP.start(uri.host, uri.port,
+                      use_ssl: use_ssl?(uri),
                       open_timeout: MEDIA_OPEN_TIMEOUT,
                       read_timeout: MEDIA_READ_TIMEOUT) { |http| http.request(req) }
     end
@@ -181,6 +190,7 @@ module WhatsAppNotifier
       req.body = JSON.generate(body) if body
 
       res = Net::HTTP.start(uri.host, uri.port,
+                            use_ssl: use_ssl?(uri),
                             open_timeout: @open_timeout,
                             read_timeout: @read_timeout) { |http| http.request(req) }
       parsed = parse_body(res.body)

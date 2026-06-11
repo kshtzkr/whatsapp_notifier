@@ -248,6 +248,40 @@ RSpec.describe WhatsAppNotifier::WebAdapter do
     expect(Net::HTTP::Get).to have_received(:new).with("/qr/default")
   end
 
+  # Net::HTTP does not infer TLS from the URL scheme — an https service URL
+  # without use_ssl would send the token and payloads in plaintext.
+  it "enables TLS for https service URLs on the JSON request path" do
+    secure = described_class.new(base_url: "https://wa.example.com")
+    allow(Net::HTTP).to receive(:start).and_return(http_success(body: { "success" => true }))
+
+    secure.logout(metadata: { user_id: "u-1" })
+
+    expect(Net::HTTP).to have_received(:start)
+      .with("wa.example.com", 443, hash_including(use_ssl: true))
+  end
+
+  it "enables TLS for https service URLs on the binary media path" do
+    secure = described_class.new(base_url: "https://wa.example.com")
+    allow(Net::HTTP).to receive(:start).and_return(binary_response(code: "404"))
+
+    secure.fetch_media(message_id: "m1", metadata: { user_id: "u-1" })
+
+    expect(Net::HTTP).to have_received(:start)
+      .with("wa.example.com", 443, hash_including(use_ssl: true))
+  end
+
+  it "keeps TLS off for plain http service URLs on both paths" do
+    allow(Net::HTTP).to receive(:start).and_return(
+      http_success(body: { "success" => true }), binary_response(code: "404")
+    )
+
+    adapter.logout(metadata: {})
+    adapter.fetch_media(message_id: "m1", metadata: {})
+
+    expect(Net::HTTP).to have_received(:start)
+      .with("127.0.0.1", 3001, hash_including(use_ssl: false)).twice
+  end
+
   it "executes the request inside the Net::HTTP block" do
     fake_http = instance_double(Net::HTTP)
     allow(fake_http).to receive(:request).and_return(http_success(body: { "qr" => "data:image/png;base64,x" }))
