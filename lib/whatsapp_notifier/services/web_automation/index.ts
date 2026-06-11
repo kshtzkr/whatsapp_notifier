@@ -27,7 +27,10 @@ import {
 } from './inbound';
 import {
     configureMedia,
-    resolveMediaForMessage
+    resolveMediaForMessage,
+    sweepExpired,
+    mediaGetResponse,
+    mediaDeleteResponse
 } from './media';
 
 const app = new Hono();
@@ -480,6 +483,14 @@ setInterval(() => {
             destroyClient(userId, wipe).catch(console.error);
         }
     }
+
+    // Evict downloaded inbound media past its TTL (and refresh the disk-cap
+    // accounting) on the same cadence — a sweep failure must not stop reaping.
+    try {
+        sweepExpired();
+    } catch (e) {
+        console.error('Media sweep failed', e);
+    }
 }, SWEEP_INTERVAL_MS);
 
 // API Routes
@@ -580,6 +591,16 @@ app.get('/inbound/:userId', async (c) => {
     await getOrCreateClient(userId);
     return c.json({ messages: drainInbound(userId) });
 });
+
+// GET/DELETE /media/:userId/:messageId — serve / evict downloaded inbound
+// media. Token-gated when WHATSAPP_WEBHOOK_TOKEN is set; ids are sanitized in
+// the store; NEVER calls getOrCreateClient (same fast-reject rule as /inbound:
+// fetching bytes for a never-paired user must not boot a Chromium).
+app.get('/media/:userId/:messageId', (c) =>
+    mediaGetResponse(c.req.param('userId'), c.req.param('messageId'), c.req.header('X-WA-Token'), WEBHOOK_TOKEN));
+
+app.delete('/media/:userId/:messageId', (c) =>
+    mediaDeleteResponse(c.req.param('userId'), c.req.param('messageId'), c.req.header('X-WA-Token'), WEBHOOK_TOKEN));
 
 
 console.log(`Starting Multi-User WhatsApp service (Bun Native) on port ${port}...`);

@@ -18,6 +18,9 @@ import {
     downloadPolicy,
     sweepExpired,
     resolveMediaForMessage,
+    verifyMediaToken,
+    mediaGetResponse,
+    mediaDeleteResponse,
     resetMediaState
 } from './media';
 
@@ -413,4 +416,87 @@ test('resolveMediaForMessage reports download_failed when persisting fails', asy
 
     expect(await resolveMediaForMessage('squat', mediaMsg()))
         .toEqual({ mediaStatus: 'unavailable', mediaError: 'download_failed' });
+});
+
+// ── verifyMediaToken ──
+
+test('verifyMediaToken enforces only when the service has a token configured', () => {
+    expect(verifyMediaToken(undefined, undefined)).toBe(true);   // unset → open
+    expect(verifyMediaToken('anything', undefined)).toBe(true);
+    expect(verifyMediaToken('secret', 'secret')).toBe(true);
+    expect(verifyMediaToken('wrong', 'secret')).toBe(false);
+    expect(verifyMediaToken(undefined, 'secret')).toBe(false);   // missing header
+    expect(verifyMediaToken('', 'secret')).toBe(false);
+});
+
+// ── GET /media route contract ──
+
+test('mediaGetResponse serves raw bytes with mime, length and disposition headers', async () => {
+    writeMedia(USER, MSG_ID, bytes('jpeg-bytes'), { mime: 'image/jpeg', filename: 'beach.jpg' });
+
+    const res = mediaGetResponse(USER, MSG_ID, undefined, undefined);
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('Content-Type')).toBe('image/jpeg');
+    expect(res.headers.get('Content-Length')).toBe('10');
+    expect(res.headers.get('Content-Disposition')).toBe('attachment; filename="beach.jpg"');
+    expect(new TextDecoder().decode(await res.arrayBuffer())).toBe('jpeg-bytes');
+});
+
+test('mediaGetResponse sanitizes hostile filenames and handles missing ones', async () => {
+    writeMedia(USER, 'm1', bytes('x'), { mime: 'application/pdf', filename: 'a"b\r\nSet-Cookie: x.pdf' });
+    const evil = mediaGetResponse(USER, 'm1', undefined, undefined);
+    expect(evil.headers.get('Content-Disposition')).toBe('attachment; filename="a_b__Set-Cookie_ x.pdf"');
+
+    writeMedia(USER, 'm2', bytes('y'), { mime: 'audio/ogg' });
+    const bare = mediaGetResponse(USER, 'm2', undefined, undefined);
+    expect(bare.headers.get('Content-Disposition')).toBe('attachment');
+});
+
+test('mediaGetResponse answers the same 404 for unknown, swept and invalid ids', async () => {
+    const missing = mediaGetResponse(USER, 'never-stored', undefined, undefined);
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toEqual({ error: 'not_found' });
+
+    const invalid = mediaGetResponse('..', '..', undefined, undefined);
+    expect(invalid.status).toBe(404);
+    expect(await invalid.json()).toEqual({ error: 'not_found' });
+});
+
+test('mediaGetResponse rejects a bad token before touching the store', async () => {
+    writeMedia(USER, MSG_ID, bytes('secret-bytes'), { mime: 'image/jpeg' });
+
+    const res = mediaGetResponse(USER, MSG_ID, 'wrong', 'expected');
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: 'unauthorized' });
+
+    expect(mediaGetResponse(USER, MSG_ID, 'expected', 'expected').status).toBe(200);
+});
+
+// ── DELETE /media route contract ──
+
+test('mediaDeleteResponse deletes the pair and stays successful on repeats', async () => {
+    writeMedia(USER, MSG_ID, bytes('x'), { mime: 'image/jpeg' });
+
+    const first = mediaDeleteResponse(USER, MSG_ID, undefined, undefined);
+    expect(first.status).toBe(200);
+    expect(await first.json()).toEqual({ success: true });
+    expect(mediaExists(USER, MSG_ID)).toBeNull();
+
+    const again = mediaDeleteResponse(USER, MSG_ID, undefined, undefined);
+    expect(await again.json()).toEqual({ success: true }); // idempotent
+
+    const never = mediaDeleteResponse(USER, 'never-stored', undefined, undefined);
+    expect(await never.json()).toEqual({ success: true });
+});
+
+test('mediaDeleteResponse enforces the token when configured', async () => {
+    writeMedia(USER, MSG_ID, bytes('x'), { mime: 'image/jpeg' });
+
+    const denied = mediaDeleteResponse(USER, MSG_ID, undefined, 'expected');
+    expect(denied.status).toBe(401);
+    expect(mediaExists(USER, MSG_ID)).not.toBeNull(); // nothing deleted
+
+    expect(mediaDeleteResponse(USER, MSG_ID, 'expected', 'expected').status).toBe(200);
+    expect(mediaExists(USER, MSG_ID)).toBeNull();
 });

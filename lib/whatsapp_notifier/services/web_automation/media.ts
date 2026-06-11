@@ -344,6 +344,72 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
     });
 }
 
+// ── Route responses ──
+//
+// Full Response builders for GET/DELETE /media/:userId/:messageId so index.ts
+// stays glue-only and the route contract is unit-testable. Neither handler may
+// ever create a WhatsApp client (same fast-reject rule as GET /inbound): they
+// touch only the on-disk store.
+
+// X-WA-Token check shared by both /media routes — ENFORCED ONLY when the
+// service has WHATSAPP_WEBHOOK_TOKEN set (mirrors the host's webhook receiver,
+// which reuses the same shared secret in the other direction). Hashing both
+// sides first gives constant-length inputs for the timing-safe comparison.
+export function verifyMediaToken(provided: string | undefined, expected: string | undefined): boolean {
+    if (!expected) return true;
+    const a = createHash('sha256').update(provided ?? '').digest();
+    const b = createHash('sha256').update(expected).digest();
+    return timingSafeEqual(a, b);
+}
+
+// Keep stored filenames from smuggling header syntax (quotes, CR/LF) into
+// Content-Disposition.
+function headerSafeFilename(name: string): string {
+    return name.replace(/[^A-Za-z0-9@. _-]/g, '_');
+}
+
+export function mediaGetResponse(
+    userId: string,
+    messageId: string,
+    token: string | undefined,
+    expectedToken: string | undefined
+): Response {
+    if (!verifyMediaToken(token, expectedToken)) {
+        return Response.json({ error: 'unauthorized' }, { status: 401 });
+    }
+    const found = readMedia(userId, messageId); // sanitizes both ids itself
+    if (!found) {
+        // Unknown, swept, deleted AND invalid ids all answer the same 404 —
+        // the route must not reveal which.
+        return Response.json({ error: 'not_found' }, { status: 404 });
+    }
+    return new Response(found.data, {
+        status: 200,
+        headers: {
+            'Content-Type': found.meta.mime || 'application/octet-stream',
+            'Content-Length': String(found.data.byteLength),
+            'Content-Disposition': found.meta.filename
+                ? `attachment; filename="${headerSafeFilename(found.meta.filename)}"`
+                : 'attachment'
+        }
+    });
+}
+
+// Idempotent by contract: the host calls this after attaching the bytes, and a
+// retry (or a TTL sweep racing it) must not turn into an error.
+export function mediaDeleteResponse(
+    userId: string,
+    messageId: string,
+    token: string | undefined,
+    expectedToken: string | undefined
+): Response {
+    if (!verifyMediaToken(token, expectedToken)) {
+        return Response.json({ error: 'unauthorized' }, { status: 401 });
+    }
+    deleteMedia(userId, messageId);
+    return Response.json({ success: true });
+}
+
 // Test helper: wipe in-memory state between examples (mirrors resetInboundState).
 export function resetMediaState() {
     cachedDiskBytes = null;
