@@ -31,6 +31,14 @@ module WhatsAppNotifier
       provider_for(provider || @configuration.provider).fetch_inbound(metadata: metadata)
     end
 
+    def fetch_media(message_id:, metadata: {}, provider: nil)
+      provider_for(provider || @configuration.provider).fetch_media(message_id: message_id, metadata: metadata)
+    end
+
+    def delete_media(message_id:, metadata: {}, provider: nil)
+      provider_for(provider || @configuration.provider).delete_media(message_id: message_id, metadata: metadata)
+    end
+
     def logout(metadata: {}, provider: nil)
       provider_for(provider || @configuration.provider).logout(metadata: metadata)
     end

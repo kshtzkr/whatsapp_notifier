@@ -100,6 +100,131 @@ RSpec.describe WhatsAppNotifier::WebAdapter do
     expect { adapter.fetch_inbound(metadata: {}) }.to raise_error(/service request failed/)
   end
 
+  it "maps the 0.7.0 media and sender keys when the wire payload carries them" do
+    body = { "messages" => [{
+      "from" => "919@c.us", "body" => "", "messageId" => "m1", "timestamp" => 123, "type" => "image",
+      "hasMedia" => true, "mediaStatus" => "available", "mediaMime" => "image/jpeg",
+      "mediaFilename" => "beach.jpg", "mediaSize" => 1024, "senderName" => "Asha"
+    }] }
+    allow(Net::HTTP).to receive(:start).and_return(http_success(body: body))
+
+    message = adapter.fetch_inbound(metadata: { user_id: "u-1" }).first
+
+    expect(message).to include(
+      has_media: true, media_status: "available", media_mime: "image/jpeg",
+      media_filename: "beach.jpg", media_size: 1024, sender_name: "Asha"
+    )
+  end
+
+  it "accepts snake_case wire aliases and maps an unavailable verdict's error" do
+    body = { "messages" => [{
+      "from" => "919@c.us", "body" => "", "message_id" => "m1", "timestamp" => 1, "type" => "video",
+      "has_media" => true, "media_status" => "unavailable", "media_error" => "unsupported_type"
+    }] }
+    allow(Net::HTTP).to receive(:start).and_return(http_success(body: body))
+
+    message = adapter.fetch_inbound(metadata: {}).first
+
+    expect(message).to include(has_media: true, media_status: "unavailable", media_error: "unsupported_type")
+    expect(message).not_to have_key(:media_mime)
+  end
+
+  # A 0.6.0 service sends no media keys at all — the mapped hash must omit
+  # them (not nil them), because hosts key-gate ingest on has_media presence.
+  it "omits the media keys entirely for 0.6.0-shaped payloads" do
+    body = [{ "from" => "919@c.us", "body" => "hi", "messageId" => "m1", "timestamp" => 123, "type" => "chat" }]
+    allow(Net::HTTP).to receive(:start).and_return(http_success(body: body))
+
+    message = adapter.fetch_inbound(metadata: {}).first
+
+    expect(message.keys).to match_array(%i[from body message_id timestamp type])
+  end
+
+  def binary_response(code:, body: "", headers: {})
+    response = double("binary response", code: code, body: body)
+    allow(response).to receive(:is_a?) { |klass| code == "200" && klass == Net::HTTPSuccess }
+    allow(response).to receive(:[]) { |name| headers[name] }
+    response
+  end
+
+  def run_binary_request(response)
+    captured = nil
+    http = double("http")
+    allow(http).to receive(:request) { |req| captured = req; response }
+    allow(Net::HTTP).to receive(:start) { |*_args, **_kwargs, &blk| blk.call(http) }
+    -> { captured }
+  end
+
+  it "fetches media bytes with mime, filename and size on a dedicated binary path" do
+    allow(ENV).to receive(:[]).and_call_original
+    allow(ENV).to receive(:[]).with("WHATSAPP_WEBHOOK_TOKEN").and_return(nil)
+    response = binary_response(
+      code: "200", body: "\xFF\xD8raw-jpeg".b,
+      headers: { "Content-Type" => "image/jpeg", "Content-Disposition" => 'attachment; filename="beach.jpg"' }
+    )
+    captured = run_binary_request(response)
+
+    media = adapter.fetch_media(message_id: "true_919@c.us_ABC", metadata: { user_id: "u-1" })
+
+    expect(media).to eq(body: "\xFF\xD8raw-jpeg".b, mime: "image/jpeg", filename: "beach.jpg", size: 10)
+    expect(captured.call.path).to eq("/media/u-1/true_919@c.us_ABC")
+    expect(captured.call["X-WA-Token"]).to be_nil # env unset -> no token header
+  end
+
+  it "returns nil when the service has no copy of the media (404)" do
+    allow(Net::HTTP).to receive(:start).and_return(binary_response(code: "404", body: '{"error":"not_found"}'))
+
+    expect(adapter.fetch_media(message_id: "m1", metadata: {})).to be_nil
+  end
+
+  it "raises on non-404 media fetch failures" do
+    allow(Net::HTTP).to receive(:start).and_return(binary_response(code: "500", body: "boom"))
+
+    expect { adapter.fetch_media(message_id: "m1", metadata: {}) }.to raise_error(/service request failed \(500\)/)
+  end
+
+  it "sends X-WA-Token on the media fetch when WHATSAPP_WEBHOOK_TOKEN is set" do
+    allow(ENV).to receive(:[]).and_call_original
+    allow(ENV).to receive(:[]).with("WHATSAPP_WEBHOOK_TOKEN").and_return("sekrit")
+    response = binary_response(code: "200", body: "x", headers: { "Content-Type" => "audio/ogg" })
+    captured = run_binary_request(response)
+
+    media = adapter.fetch_media(message_id: "m1", metadata: { user_id: "u-1" })
+
+    expect(captured.call["X-WA-Token"]).to eq("sekrit")
+    expect(media).to include(mime: "audio/ogg", filename: nil, size: 1)
+  end
+
+  it "strips path and query characters from the message id before building the URL" do
+    response = binary_response(code: "404")
+    captured = run_binary_request(response)
+
+    adapter.fetch_media(message_id: "../m1?x=1#f", metadata: { user_id: "u-1" })
+
+    expect(captured.call.path).to eq("/media/u-1/..m1x1f")
+  end
+
+  it "deletes media via the JSON control plane with the token attached" do
+    allow(ENV).to receive(:[]).and_call_original
+    allow(ENV).to receive(:[]).with("WHATSAPP_WEBHOOK_TOKEN").and_return("sekrit")
+    response = http_success(body: { "success" => true })
+    captured = nil
+    http = double("http")
+    allow(http).to receive(:request) { |req| captured = req; response }
+    allow(Net::HTTP).to receive(:start) { |*_args, **_kwargs, &blk| blk.call(http) }
+
+    expect(adapter.delete_media(message_id: "m/1", metadata: { user_id: "u-1" })).to eq(success: true)
+    expect(captured).to be_a(Net::HTTP::Delete)
+    expect(captured.path).to eq("/media/u-1/m1")
+    expect(captured["X-WA-Token"]).to eq("sekrit")
+  end
+
+  it "defaults delete_media success to false when the service omits it" do
+    allow(Net::HTTP).to receive(:start).and_return(http_success(body: {}))
+
+    expect(adapter.delete_media(message_id: "m1", metadata: {})).to eq(success: false)
+  end
+
   it "logs out via the service" do
     allow(Net::HTTP).to receive(:start).and_return(http_success(body: { "success" => true }))
 

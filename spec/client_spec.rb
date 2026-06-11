@@ -67,6 +67,27 @@ RSpec.describe WhatsAppNotifier::Client do
     end
   end
 
+  it "delegates fetch_media and delete_media to the provider" do
+    Dir.mktmpdir do |dir|
+      config.provider = :web_automation
+      config.web_automation_enabled = true
+      config.web_session_path = File.join(dir, "session.json")
+      config.web_adapter = double(
+        send_message: { success: true, session: {} },
+        fetch_qr_code: "qr",
+        connection_status: { state: "AUTHENTICATED", authenticated: true },
+        fetch_media: { body: "bytes", mime: "image/jpeg", filename: nil, size: 5 },
+        delete_media: { success: true }
+      )
+      client = described_class.new(configuration: config)
+
+      expect(client.fetch_media(message_id: "m1", provider: :web_automation, metadata: { user_id: 1 }))
+        .to include(body: "bytes", size: 5)
+      expect(client.delete_media(message_id: "m1", provider: :web_automation, metadata: { user_id: 1 }))
+        .to eq(success: true)
+    end
+  end
+
   it "delegates logout to the provider" do
     Dir.mktmpdir do |dir|
       config.provider = :web_automation
