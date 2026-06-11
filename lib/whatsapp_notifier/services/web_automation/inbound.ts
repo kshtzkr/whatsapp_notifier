@@ -19,6 +19,27 @@ export interface InboundMsg {
     messageId: string;
     timestamp: number;
     type: string;
+    // 0.7.0 media + sender enrichment. ALL optional and only present when the
+    // message actually carries them, so the wire format stays byte-compatible
+    // with 0.6.0 hosts (and 0.7.0 hosts can key-gate on hasMedia).
+    hasMedia?: boolean;
+    mediaStatus?: 'available' | 'unavailable';
+    mediaError?: string;
+    mediaMime?: string;
+    mediaFilename?: string;
+    mediaSize?: number;
+    senderName?: string;
+}
+
+// Media verdict merged into the payload by captureInbound — structurally
+// matches media.ts's MediaResolution without importing it (inbound stays the
+// dependency-free core).
+export interface InboundMediaInfo {
+    mediaStatus: 'available' | 'unavailable';
+    mediaError?: string;
+    mediaMime?: string;
+    mediaFilename?: string;
+    mediaSize?: number;
 }
 
 export const INBOUND_QUEUE_CAP = 1000;
@@ -113,15 +134,20 @@ export function shouldCapture(userId: string, msg: any): boolean {
     return true;
 }
 
-export function normalizeInbound(msg: any): InboundMsg {
+export function normalizeInbound(msg: any, media?: InboundMediaInfo): InboundMsg {
     const from: string = msg.from || '';
-    return {
+    const inbound: InboundMsg = {
         from,
         body: msg.body || '',
         messageId: (msg.id && msg.id._serialized) || `${from}-${msg.timestamp}`,
         timestamp: msg.timestamp || Math.floor(Date.now() / 1000),
         type: msg.type || 'chat'
     };
+    // Media keys are added ONLY for media messages so text payloads keep the
+    // exact 0.6.0 five-field shape (hosts key-gate on hasMedia presence).
+    if (msg.hasMedia) inbound.hasMedia = true;
+    if (media) Object.assign(inbound, media);
+    return inbound;
 }
 
 // Minimal slice of whatsapp-web.js Client that backfill needs — a seam so the

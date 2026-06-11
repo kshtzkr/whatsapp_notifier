@@ -215,3 +215,39 @@ test('normalizeInbound maps fields and falls back on missing id', () => {
     expect(b.body).toBe('');
     expect(b.type).toBe('chat');
 });
+
+// 0.6.0 wire back-compat: text payloads must keep the exact five-field shape —
+// no media keys, not even hasMedia:false (hosts key-gate on hasMedia presence).
+test('normalizeInbound keeps the 0.6.0 shape for non-media messages', () => {
+    const plain = normalizeInbound(msg({ hasMedia: false }));
+    expect(Object.keys(plain).sort()).toEqual(['body', 'from', 'messageId', 'timestamp', 'type']);
+});
+
+test('normalizeInbound flags hasMedia even when no verdict is supplied', () => {
+    const out = normalizeInbound(msg({ hasMedia: true, type: 'image' }));
+    expect(out.hasMedia).toBe(true);
+    expect(out.type).toBe('image');
+    expect('mediaStatus' in out).toBe(false);                // verdict is capture-level
+});
+
+test('normalizeInbound merges an available media verdict into the payload', () => {
+    const out = normalizeInbound(msg({ hasMedia: true, type: 'image' }), {
+        mediaStatus: 'available', mediaMime: 'image/jpeg', mediaFilename: 'beach.jpg', mediaSize: 1024
+    });
+    expect(out).toEqual({
+        from: CUST, body: 'hello', messageId: 'true_919999000001@c.us_ABC',
+        timestamp: 1717000000, type: 'image',
+        hasMedia: true, mediaStatus: 'available',
+        mediaMime: 'image/jpeg', mediaFilename: 'beach.jpg', mediaSize: 1024
+    });
+});
+
+test('normalizeInbound merges an unavailable verdict with its typed reason', () => {
+    const out = normalizeInbound(msg({ hasMedia: true, type: 'video' }), {
+        mediaStatus: 'unavailable', mediaError: 'unsupported_type'
+    });
+    expect(out.hasMedia).toBe(true);
+    expect(out.mediaStatus).toBe('unavailable');
+    expect(out.mediaError).toBe('unsupported_type');
+    expect('mediaMime' in out).toBe(false);
+});
