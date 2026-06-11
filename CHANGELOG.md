@@ -5,23 +5,42 @@
 Inbound media: the service now downloads customer images, voice notes and
 documents to disk and serves them back to the host on demand.
 
+### Upgrade notes
+- **Hosts that monkey-patch `WhatsAppNotifier::WebAdapter#request`**: the
+  shared JSON path now carries the `DELETE` verb (`delete_media`) and attaches
+  `X-WA-Token` when `WHATSAPP_WEBHOOK_TOKEN` is set — a patch that only
+  handles `POST`/`GET` or drops headers will break the new media calls against
+  a token-guarded service. Better: retire the patch. The adapter now honors
+  `https://` service URLs natively on BOTH request paths (`use_ssl` follows
+  the URL scheme; previously a https URL silently spoke plaintext), which was
+  the usual reason such patches existed.
+- **`POST /logout` now also wipes the user's downloaded inbound media**
+  (`<SESSION_DIR>/media/<userId>/`) along with the session dir and queued
+  replies. Media stored under a pairing belongs to that pairing — previously
+  it stayed on disk (and fetchable via `GET /media`) for up to the 48h TTL
+  after the operator severed the pairing.
+
 ### Service
 - New `media.ts` store: bytes live at `<SESSION_DIR>/media/<userId>/<messageId>`
-  with a JSON sidecar (`mime`, `filename`, `size`, `capturedAt`), so cached
-  media survives restarts that wipe the in-memory inbound queues. Both ids are
-  sanitized to `[A-Za-z0-9@._-]` and resolved paths are confined to the media
-  root (path-traversal guarded on both ends).
+  with a JSON sidecar at `<messageId>~meta.json` (`mime`, `filename`, `size`,
+  `capturedAt`), so cached media survives restarts that wipe the in-memory
+  inbound queues. Both ids are sanitized to `[A-Za-z0-9@._-]` and resolved
+  paths are confined to the media root (path-traversal guarded on both ends);
+  the `~` in the sidecar suffix sits outside the sanitize charset, so a
+  message id ending in `.json` can never collide with a sidecar.
 - Download policy: images, audio and voice notes (`ptt`) up to 16MB; documents
   up to `WHATSAPP_MEDIA_MAX_BYTES` (default 25MB); stickers, videos and
   view-once media are never downloaded (`mediaError: unsupported_type`).
   Oversize media reports `too_large`; a full cache reports `disk_full`.
-- `captureInbound` resolves media BEFORE enqueue + webhook: declared-size
-  policy pre-check, 30s-bounded `downloadMedia()` (vanished media →
-  `expired`, errors/timeouts → `download_failed`), post-download size
-  re-check, then persist. The message itself always reaches the host — every
-  failure mode just arrives without bytes
-  (`mediaStatus: 'unavailable'` + a typed `mediaError`). The reconnect
-  backfill short-circuits on media already stored instead of re-downloading.
+- The capture pipeline resolves the sender (contact lookup + `@lid` → phone)
+  FIRST and drops unresolvable `@lid` messages before any download, then
+  resolves media BEFORE enqueue + webhook: declared-size policy pre-check,
+  30s-bounded `downloadMedia()` (vanished media → `expired`, errors/timeouts
+  → `download_failed`), post-download size re-check, then persist. A kept
+  message always reaches the host — every media failure mode just arrives
+  without bytes (`mediaStatus: 'unavailable'` + a typed `mediaError`). The
+  reconnect backfill short-circuits on media already stored instead of
+  re-downloading.
 - Inbound payloads gain OPTIONAL `hasMedia` / `mediaStatus` / `mediaError` /
   `mediaMime` / `mediaFilename` / `mediaSize` / `senderName` (best-effort
   contact display name). Keys appear only when carried, so the wire format is
@@ -38,6 +57,11 @@ documents to disk and serves them back to the host on demand.
 - TTL sweep on the existing 5-minute reaper interval: media older than
   `WHATSAPP_MEDIA_TTL_MS` (default 48h) is evicted and the disk accounting for
   the `WHATSAPP_MEDIA_MAX_DISK_BYTES` cap (default 5GB) is refreshed.
+- `POST /logout` wipes the user's stored media (see upgrade notes) — sanitized
+  id, root-contained path, disk-cap accounting refreshed.
+- Malformed limit envs (`WHATSAPP_MEDIA_TTL_MS` / `WHATSAPP_MEDIA_MAX_BYTES` /
+  `WHATSAPP_MEDIA_MAX_DISK_BYTES`) fall back to their defaults instead of
+  parsing to `NaN` and silently disabling the sweep and the caps.
 
 ### Adapter & Ruby API
 - `fetch_inbound` passes the new keys through as `has_media` / `media_status`
@@ -50,8 +74,14 @@ documents to disk and serves them back to the host on demand.
   bypassed so payloads cannot be corrupted; 60s read timeout; sends
   `X-WA-Token` when `WHATSAPP_WEBHOOK_TOKEN` is set).
 - New `WhatsAppNotifier.delete_media(message_id:, metadata:)` → host calls it
-  after attaching the bytes; idempotent. The shared JSON request path now
-  supports DELETE and attaches `X-WA-Token` when configured.
+  after attaching the bytes; idempotent. A 404 (0.6.0 service mid-rollout, or
+  media already evicted) degrades to `{ success: false }` instead of raising —
+  the same graceful-degradation matrix as `fetch_media`'s `nil`. The shared
+  JSON request path now supports DELETE and attaches `X-WA-Token` when
+  configured.
+- Both adapter request paths (JSON control plane + binary media fetch) pass
+  `use_ssl` from the URL scheme, so `https://` service URLs are honored
+  natively.
 - Provider/Client/module delegation guard the new adapter capabilities with
   the same `respond_to?` idiom as `fetch_inbound`, and
   `rails g whatsapp_notifier:install_service` ejects `media.ts`.
