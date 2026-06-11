@@ -14,16 +14,12 @@ import {
 } from './sessions';
 import {
     InboundMsg,
-    InboundMediaInfo,
     configureInbound,
     rememberTarget,
-    rememberLidAlias,
     backfillTargets,
-    enqueueInbound,
     drainInbound,
     clearInbound,
-    shouldCapture,
-    normalizeInbound
+    processInbound
 } from './inbound';
 import {
     configureMedia,
@@ -101,45 +97,15 @@ async function pushWebhook(userId: string, msg: InboundMsg) {
     }
 }
 
-// Wrapper: sanity filter → download media → normalize → resolve contact
-// (senderName + @lid phone) → enqueue → optional webhook.
+// Wrapper around the testable pipeline in inbound.ts (sanity filter → sender
+// resolution with early @lid drop → media download → normalize → enqueue →
+// webhook). The catch keeps a single bad message from killing the listener.
 async function captureInbound(userId: string, msg: any) {
     try {
-        if (!shouldCapture(userId, msg)) return;
-        // Resolve media BEFORE enqueue+webhook so the payload carries the final
-        // verdict; mediaExists short-circuits re-downloads when the reconnect
-        // backfill replays a message we already captured.
-        let media: InboundMediaInfo | undefined;
-        if (msg.hasMedia) {
-            media = await resolveMediaForMessage(userId, msg);
-        }
-        const inbound = normalizeInbound(msg, media);
-        // One best-effort contact lookup feeds both the sender's display name
-        // and the @lid phone resolution. Failure must never drop the message.
-        let contact: any;
-        try {
-            contact = await msg.getContact();
-        } catch (e) {
-            console.error(`contact lookup failed for ${userId}`, e);
-        }
-        const senderName = contact && (contact.pushname || contact.name || contact.shortName);
-        if (senderName) inbound.senderName = String(senderName);
-        // Newer WhatsApp delivers the reply's `from` as an @lid privacy id with
-        // no phone number, which the host can't match. Resolve it to the real
-        // phone via the contact so callers always get a phone-number @c.us.
-        if (inbound.from.endsWith('@lid')) {
-            const rawFrom = inbound.from;
-            const num = contact && (contact.number || (contact.id && contact.id.user));
-            if (num) inbound.from = `${String(num).replace(/\D/g, '')}@c.us`;
-            // Still an @lid => no phone to match or scope by. Drop it rather than
-            // forward an unmatchable, unpurgeable plaintext body.
-            if (inbound.from.endsWith('@lid')) return;
-            // Known recipient replying from a privacy-number chat: allowlist the
-            // @lid chat id too, so the reconnect backfill can re-open this chat.
-            rememberLidAlias(userId, rawFrom, inbound.from);
-        }
-        enqueueInbound(userId, inbound);
-        pushWebhook(userId, inbound);
+        await processInbound(userId, msg, {
+            resolveMedia: resolveMediaForMessage,
+            push: pushWebhook
+        });
     } catch (e) {
         console.error(`captureInbound error for ${userId}`, e);
     }
