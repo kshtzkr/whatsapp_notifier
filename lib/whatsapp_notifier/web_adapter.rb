@@ -18,9 +18,13 @@ module WhatsAppNotifier
     }.freeze
 
     # Optional inbound keys introduced by the 0.7.0 service (media verdict +
-    # sender display name). Mapped ONLY when the wire payload carries them, so
-    # hosts can key-gate on has_media presence: a missing key means "0.6.0
-    # service, no media support", while has_media: false means "text message".
+    # sender display name) and the 0.8.0 service (two-way capture). Mapped
+    # ONLY when the wire payload carries them, so hosts can key-gate on
+    # presence: a missing has_media means "0.6.0 service, no media support"
+    # (while has_media: false means "text message"), and a missing from_me
+    # means "customer message or pre-0.8.0 service". `to` carries the
+    # counterparty chat id on operator-sent (from_me) messages — the id the
+    # host threads the conversation on.
     INBOUND_OPTIONAL_KEYS = {
       has_media: %w[hasMedia has_media],
       media_status: %w[mediaStatus media_status],
@@ -28,7 +32,9 @@ module WhatsAppNotifier
       media_mime: %w[mediaMime media_mime],
       media_filename: %w[mediaFilename media_filename],
       media_size: %w[mediaSize media_size],
-      sender_name: %w[senderName sender_name]
+      sender_name: %w[senderName sender_name],
+      to: %w[to],
+      from_me: %w[fromMe from_me]
     }.freeze
 
     def self.default_base_url
@@ -54,7 +60,12 @@ module WhatsAppNotifier
       response = request(:post, "/send/#{user_id}", body: body)
       {
         success: response.fetch("success"),
-        message_id: payload[:idempotency_key] || "local-#{Time.now.to_i}",
+        # Prefer the service-issued WhatsApp message id (0.8.0): it is the key
+        # the host dedupes the send's own fromMe echo on, so a real id must
+        # win over the locally fabricated one. The fallback keeps 0.7.0
+        # services (no messageId in the response) working unchanged.
+        message_id: response["messageId"] || response["message_id"] ||
+                    payload[:idempotency_key] || "local-#{Time.now.to_i}",
         session: session,
         error_message: response["error"]
       }

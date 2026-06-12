@@ -24,6 +24,52 @@ RSpec.describe WhatsAppNotifier::WebAdapter do
     expect(result).to include(success: true, message_id: "k1")
   end
 
+  # The 0.8.0 service returns the real WhatsApp message id — the key the host
+  # dedupes the send's own fromMe echo on. It must beat the fabricated id.
+  it "prefers the service-issued message id over the idempotency key" do
+    response = http_success(body: { "success" => true, "messageId" => "true_919@c.us_ABC" })
+    allow(Net::HTTP).to receive(:start).and_return(response)
+
+    result = adapter.send_message(
+      payload: { to: "+1", body: "hi", metadata: { user_id: 1 }, idempotency_key: "k1" },
+      session: {}
+    )
+
+    expect(result).to include(success: true, message_id: "true_919@c.us_ABC")
+  end
+
+  it "accepts the snake_case message_id alias in the send response" do
+    response = http_success(body: { "success" => true, "message_id" => "true_919@c.us_DEF" })
+    allow(Net::HTTP).to receive(:start).and_return(response)
+
+    result = adapter.send_message(payload: { to: "+1", body: "hi", metadata: {} }, session: {})
+
+    expect(result).to include(message_id: "true_919@c.us_DEF")
+  end
+
+  # A 0.8.0 service that could not read the sent message's id answers
+  # messageId: null — fall through to the 0.7.0 fabrication chain.
+  it "falls back to the idempotency key when the service returns a null id" do
+    response = http_success(body: { "success" => true, "messageId" => nil })
+    allow(Net::HTTP).to receive(:start).and_return(response)
+
+    result = adapter.send_message(
+      payload: { to: "+1", body: "hi", metadata: {}, idempotency_key: "k1" },
+      session: {}
+    )
+
+    expect(result).to include(message_id: "k1")
+  end
+
+  it "fabricates a local id when neither the service nor the payload offers one" do
+    response = http_success(body: { "success" => true })
+    allow(Net::HTTP).to receive(:start).and_return(response)
+
+    result = adapter.send_message(payload: { to: "+1", body: "hi", metadata: {} }, session: {})
+
+    expect(result[:message_id]).to match(/\Alocal-\d+\z/)
+  end
+
   it "yields the http connection to run the request" do
     response = http_success(body: { "success" => true })
     http = instance_double(Net::HTTP, request: response)
@@ -131,13 +177,44 @@ RSpec.describe WhatsAppNotifier::WebAdapter do
 
   # A 0.6.0 service sends no media keys at all — the mapped hash must omit
   # them (not nil them), because hosts key-gate ingest on has_media presence.
-  it "omits the media keys entirely for 0.6.0-shaped payloads" do
+  # Same contract for the 0.8.0 two-way keys: a customer message carries no
+  # from_me/to, so they must be absent (hosts key-gate fromMe ingest too).
+  it "omits the media and two-way keys entirely for plain inbound payloads" do
     body = [{ "from" => "919@c.us", "body" => "hi", "messageId" => "m1", "timestamp" => 123, "type" => "chat" }]
     allow(Net::HTTP).to receive(:start).and_return(http_success(body: body))
 
     message = adapter.fetch_inbound(metadata: {}).first
 
     expect(message.keys).to match_array(%i[from body message_id timestamp type])
+  end
+
+  # 0.8.0 two-way capture: operator-sent messages arrive with fromMe + to —
+  # `to` is the counterparty chat id the host threads the conversation on.
+  it "maps the 0.8.0 two-way keys when the wire payload carries them" do
+    body = { "messages" => [{
+      "from" => "919000000001@c.us", "to" => "919@c.us", "fromMe" => true,
+      "body" => "on my way", "messageId" => "true_919@c.us_OP1", "timestamp" => 5, "type" => "chat"
+    }] }
+    allow(Net::HTTP).to receive(:start).and_return(http_success(body: body))
+
+    message = adapter.fetch_inbound(metadata: { user_id: "u-1" }).first
+
+    expect(message).to include(
+      from: "919000000001@c.us", to: "919@c.us", from_me: true,
+      body: "on my way", message_id: "true_919@c.us_OP1"
+    )
+  end
+
+  it "accepts the snake_case from_me wire alias" do
+    body = { "messages" => [{
+      "from" => "919000000001@c.us", "to" => "919@c.us", "from_me" => true,
+      "body" => "done", "message_id" => "m9", "timestamp" => 9, "type" => "chat"
+    }] }
+    allow(Net::HTTP).to receive(:start).and_return(http_success(body: body))
+
+    message = adapter.fetch_inbound(metadata: {}).first
+
+    expect(message).to include(from_me: true, to: "919@c.us")
   end
 
   def binary_response(code:, body: "", headers: {})
