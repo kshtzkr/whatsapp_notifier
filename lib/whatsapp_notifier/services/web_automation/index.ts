@@ -29,6 +29,7 @@ import {
     mediaGetResponse,
     mediaDeleteResponse
 } from './media';
+import { sentMessageId } from './send';
 
 const app = new Hono();
 const port = Number(process.env.PORT || 3001);
@@ -197,6 +198,8 @@ async function waitForClientReady(clientData: ClientData, timeoutMs = 30000): Pr
     throw new Error('Client not ready: WhatsApp Web store did not initialize in time');
 }
 
+// Resolves to the sent whatsapp-web.js Message so /send can hand the real
+// message id back to the host (the echo-dedupe key for two-way capture).
 async function sendMessageWithRetry(client: Client, clientData: ClientData, chatId: string, message: string, mediaUrl?: string | null) {
     const maxAttempts = 5;
 
@@ -208,12 +211,10 @@ async function sendMessageWithRetry(client: Client, clientData: ClientData, chat
             if (mediaUrl) {
                 const { MessageMedia } = require('whatsapp-web.js');
                 const media = await MessageMedia.fromUrl(mediaUrl);
-                await client.sendMessage(chatId, media, { caption: message });
-            } else {
-                await client.sendMessage(chatId, message);
+                return await client.sendMessage(chatId, media, { caption: message });
             }
 
-            return;
+            return await client.sendMessage(chatId, message);
         } catch (error) {
             console.error(`Send attempt ${attempt}/${maxAttempts} failed for chat ${chatId}:`, error);
 
@@ -542,13 +543,15 @@ app.post('/send/:userId', async (c) => {
 
     try {
         const chatId = to.includes('@c.us') ? to : `${to}@c.us`;
-        await sendMessageWithRetry(data.client, data, chatId, message, mediaUrl);
+        const sent = await sendMessageWithRetry(data.client, data, chatId, message, mediaUrl);
 
         // Record the recipient so their replies survive a reconnect backfill.
         rememberTarget(userId, chatId);
 
         data.lastUsed = Date.now();
-        return c.json({ success: true });
+        // messageId is the echo-dedupe key: this send fires its own fromMe
+        // message_create, which the host must match by id (see send.ts).
+        return c.json({ success: true, messageId: sentMessageId(sent) });
     } catch (error: any) {
         console.error(`Send error for user ${userId}:`, error);
         return c.json({ success: false, error: error.message }, 500);
