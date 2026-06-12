@@ -17,10 +17,12 @@ import {
     configureInbound,
     rememberTarget,
     backfillTargets,
+    resolveChat,
     drainInbound,
     clearInbound,
     processInbound
 } from './inbound';
+import { chatsResponse, historyResponse, HistoryDeps } from './history';
 import {
     configureMedia,
     resolveMediaForMessage,
@@ -581,6 +583,37 @@ app.get('/media/:userId/:messageId', (c) =>
 
 app.delete('/media/:userId/:messageId', (c) =>
     mediaDeleteResponse(c.req.param('userId'), c.req.param('messageId'), c.req.header('X-WA-Token'), WEBHOOK_TOKEN));
+
+// ── Chat history (history.ts) ──
+//
+// Shared deps for the two history routes: the SAME pairing fast-reject and
+// client accessor /send uses (never any other initialization path), plus
+// inbound.ts's chat resolver + reconnect allowlist.
+const historyDeps: HistoryDeps = {
+    hasPaired: (userId) => hasPairedSession(userId, clients, sessionDirForUser),
+    getClient: getOrCreateClient,
+    resolveChat,
+    rememberTarget
+};
+
+// GET /chats/:userId — list the paired number's 1:1 chats (discovery for the
+// host's old-conversation sync). Token-gated like /media; paired+ready gated
+// like /send; capped at the newest 500 (see history.ts).
+app.get('/chats/:userId', (c) =>
+    chatsResponse(c.req.param('userId'), c.req.header('X-WA-Token'), WEBHOOK_TOKEN, historyDeps));
+
+// POST /history/:userId { chatId, limit } — replay one chat's history through
+// the live-capture normalizer and return it DIRECTLY in the response (no
+// queue, no webhook — the host ingests synchronously). History media is
+// marked unavailable by design, never downloaded (see history.ts).
+app.post('/history/:userId', async (c) =>
+    historyResponse(
+        c.req.param('userId'),
+        await c.req.json().catch(() => ({})),
+        c.req.header('X-WA-Token'),
+        WEBHOOK_TOKEN,
+        historyDeps
+    ));
 
 
 console.log(`Starting Multi-User WhatsApp service (Bun Native) on port ${port}...`);
