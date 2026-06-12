@@ -6,6 +6,30 @@ module WhatsAppNotifier
   class WebAdapter
     DEFAULT_OPEN_TIMEOUT = 5
     DEFAULT_READ_TIMEOUT = 30
+    # Media bytes can be tens of MB over a slow link — give the binary fetch a
+    # longer read window than the JSON control plane.
+    MEDIA_OPEN_TIMEOUT = 5
+    MEDIA_READ_TIMEOUT = 60
+
+    HTTP_CLASSES = {
+      post: Net::HTTP::Post,
+      get: Net::HTTP::Get,
+      delete: Net::HTTP::Delete
+    }.freeze
+
+    # Optional inbound keys introduced by the 0.7.0 service (media verdict +
+    # sender display name). Mapped ONLY when the wire payload carries them, so
+    # hosts can key-gate on has_media presence: a missing key means "0.6.0
+    # service, no media support", while has_media: false means "text message".
+    INBOUND_OPTIONAL_KEYS = {
+      has_media: %w[hasMedia has_media],
+      media_status: %w[mediaStatus media_status],
+      media_error: %w[mediaError media_error],
+      media_mime: %w[mediaMime media_mime],
+      media_filename: %w[mediaFilename media_filename],
+      media_size: %w[mediaSize media_size],
+      sender_name: %w[senderName sender_name]
+    }.freeze
 
     def self.default_base_url
       ENV["WHATSAPP_NOTIFIER_SERVICE_URL"] || ENV["WHATSAPP_SERVICE_URL"] || "http://127.0.0.1:3001"
@@ -60,15 +84,40 @@ module WhatsAppNotifier
       user_id = user_id_from(metadata)
       response = request(:get, "/inbound/#{user_id}")
       raw = response.is_a?(Hash) ? response["messages"] : response
-      Array(raw).map do |m|
-        {
-          from: m["from"],
-          body: m["body"],
-          message_id: m["messageId"] || m["message_id"],
-          timestamp: m["timestamp"],
-          type: m["type"]
-        }
-      end
+      Array(raw).map { |m| map_inbound_message(m) }
+    end
+
+    # Fetches the raw bytes of a downloaded inbound media file. Returns
+    # { body:, mime:, filename:, size: } or nil when the service has no copy
+    # (never downloaded, swept by TTL, or already deleted).
+    #
+    # Deliberately NOT routed through #request: that path JSON-parses the
+    # response body (and host apps are known to patch it further), which would
+    # corrupt binary payloads.
+    def fetch_media(message_id:, metadata: {})
+      user_id = user_id_from(metadata)
+      res = binary_get("/media/#{user_id}/#{path_id(message_id)}")
+      return nil if res.code.to_s == "404"
+      raise "service request failed (#{res.code}): #{res.body}" unless res.is_a?(Net::HTTPSuccess)
+
+      body = res.body.to_s
+      {
+        body: body,
+        mime: res["Content-Type"],
+        filename: filename_from(res["Content-Disposition"]),
+        size: body.bytesize
+      }
+    end
+
+    # Removes the service's copy after the host has attached the bytes.
+    # Idempotent on the service side: deleting absent media still succeeds.
+    # A 0.6.0 service mid-rollout has no /media routes and answers 404 —
+    # degrade to { success: false } instead of raising, mirroring
+    # fetch_media's nil-on-404.
+    def delete_media(message_id:, metadata: {})
+      user_id = user_id_from(metadata)
+      response = request(:delete, "/media/#{user_id}/#{path_id(message_id)}", allow_404: true)
+      { success: response.fetch("success", false) }
     end
 
     # Logs the user out of WhatsApp and clears their saved session on the service.
@@ -84,18 +133,75 @@ module WhatsAppNotifier
       (metadata[:user_id] || metadata["user_id"] || "default").to_s
     end
 
-    def request(method, path, body: nil)
+    def map_inbound_message(message)
+      mapped = {
+        from: message["from"],
+        body: message["body"],
+        message_id: message["messageId"] || message["message_id"],
+        timestamp: message["timestamp"],
+        type: message["type"]
+      }
+      INBOUND_OPTIONAL_KEYS.each do |key, wire_keys|
+        wire = wire_keys.find { |candidate| message.key?(candidate) }
+        mapped[key] = message[wire] if wire
+      end
+      mapped
+    end
+
+    # Mirror the service-side sanitizeId charset so a hostile message_id can
+    # never smuggle path separators or a query string into the request URL.
+    def path_id(message_id)
+      message_id.to_s.gsub(/[^A-Za-z0-9@._-]/, "")
+    end
+
+    def filename_from(content_disposition)
+      content_disposition.to_s[/filename="([^"]*)"/, 1]
+    end
+
+    # The /media routes are token-gated when the service has
+    # WHATSAPP_WEBHOOK_TOKEN set — the same shared secret the service uses to
+    # sign its webhook pushes, reused in the other direction.
+    def webhook_token
+      token = ENV["WHATSAPP_WEBHOOK_TOKEN"].to_s
+      token.empty? ? nil : token
+    end
+
+    # Net::HTTP does NOT infer TLS from the URL scheme — without an explicit
+    # use_ssl a https:// service URL would silently speak plaintext to port
+    # 443. Both request paths (JSON control plane + binary media fetch) must
+    # honor the scheme.
+    def use_ssl?(uri)
+      uri.scheme == "https"
+    end
+
+    def binary_get(path)
       uri = URI.parse("#{@base_url}#{path}")
-      klass = method == :post ? Net::HTTP::Post : Net::HTTP::Get
-      req = klass.new(uri.request_uri)
+      req = Net::HTTP::Get.new(uri.request_uri)
+      req["X-WA-Token"] = webhook_token if webhook_token
+
+      Net::HTTP.start(uri.host, uri.port,
+                      use_ssl: use_ssl?(uri),
+                      open_timeout: MEDIA_OPEN_TIMEOUT,
+                      read_timeout: MEDIA_READ_TIMEOUT) { |http| http.request(req) }
+    end
+
+    def request(method, path, body: nil, allow_404: false)
+      uri = URI.parse("#{@base_url}#{path}")
+      req = HTTP_CLASSES.fetch(method).new(uri.request_uri)
       req["Content-Type"] = "application/json"
+      req["X-WA-Token"] = webhook_token if webhook_token
       req.body = JSON.generate(body) if body
 
       res = Net::HTTP.start(uri.host, uri.port,
+                            use_ssl: use_ssl?(uri),
                             open_timeout: @open_timeout,
                             read_timeout: @read_timeout) { |http| http.request(req) }
       parsed = parse_body(res.body)
       return parsed if res.is_a?(Net::HTTPSuccess)
+      # Callers opting in treat "route/resource not there" as a soft miss
+      # (e.g. delete_media against a 0.6.0 service) — the parsed error body
+      # carries no "success" key, so they degrade rather than raise.
+      return parsed if allow_404 && res.code.to_s == "404"
 
       raise "service request failed (#{res.code}): #{parsed["error"] || res.body}"
     end

@@ -57,9 +57,11 @@ status = WhatsAppNotifier.connection_status(metadata: { user_id: current_user.id
 ## Log out (disconnect + clear session)
 
 Explicitly disconnects the user and wipes their saved WhatsApp session from the
-service, so the next connect starts fresh with a new QR. Call this from a
-user-initiated "Log out WhatsApp" action — NOT from your app's sign-out, which
-should leave the WhatsApp session intact for the next login.
+service — including any downloaded inbound media and queued replies, which
+belong to the old pairing — so the next connect starts fresh with a new QR.
+Call this from a user-initiated "Log out WhatsApp" action — NOT from your
+app's sign-out, which should leave the WhatsApp session intact for the next
+login.
 
 ```ruby
 WhatsAppNotifier.logout(metadata: { user_id: current_user.id })
@@ -143,6 +145,21 @@ creates a WhatsApp client — so it is safe to poll every few seconds:
 `sessions` is the number of clients held in memory; `ready` is how many of
 those have a fully hydrated WhatsApp Web store. Prometheus metrics live at
 `GET /metrics`.
+
+## Upgrading to 0.7.0
+
+- **If your app monkey-patches `WhatsAppNotifier::WebAdapter#request`** (a
+  common trick to bolt TLS onto the service URL): the shared JSON path now
+  also carries `DELETE` (`delete_media`) and attaches `X-WA-Token` when
+  `WHATSAPP_WEBHOOK_TOKEN` is set. A patch that only routes `POST`/`GET` or
+  drops headers will break the new media calls. Prefer retiring the patch
+  entirely — the adapter now honors `https://` service URLs natively on both
+  the JSON control plane and the binary media path (`use_ssl` follows the URL
+  scheme), so TLS no longer needs a patch.
+- **Logout now wipes stored media**: `POST /logout` removes the user's
+  downloaded inbound media along with the session dir and queued replies.
+  Fetch (and ideally `delete_media`) anything you want to keep before logging
+  a user out.
 
 ## Notes
 

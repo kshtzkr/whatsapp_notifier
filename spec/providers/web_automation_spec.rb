@@ -137,6 +137,45 @@ RSpec.describe WhatsAppNotifier::Providers::WebAutomation do
     end
   end
 
+  it "fetches and deletes media via the adapter when enabled" do
+    Dir.mktmpdir do |dir|
+      adapter = double(
+        fetch_qr_code: "qr", connection_status: {},
+        fetch_media: { body: "bytes", mime: "image/jpeg", filename: "a.jpg", size: 5 },
+        delete_media: { success: true }
+      )
+      config = build_config(path: File.join(dir, "session.json"), adapter: adapter)
+      provider = described_class.new(configuration: config)
+
+      expect(provider.fetch_media(message_id: "m1", metadata: { user_id: 1 })).to include(mime: "image/jpeg")
+      expect(provider.delete_media(message_id: "m1", metadata: { user_id: 1 })).to eq(success: true)
+      expect(adapter).to have_received(:fetch_media).with(message_id: "m1", metadata: { user_id: 1 })
+      expect(adapter).to have_received(:delete_media).with(message_id: "m1", metadata: { user_id: 1 })
+    end
+  end
+
+  it "raises on the media helpers when the provider is disabled" do
+    Dir.mktmpdir do |dir|
+      adapter = double(fetch_qr_code: "qr", connection_status: {}, fetch_media: nil, delete_media: { success: true })
+      config = build_config(path: File.join(dir, "session.json"), adapter: adapter, enabled: false)
+      provider = described_class.new(configuration: config)
+
+      expect { provider.fetch_media(message_id: "m1") }.to raise_error(WhatsAppNotifier::ConfigurationError, /disabled/)
+      expect { provider.delete_media(message_id: "m1") }.to raise_error(WhatsAppNotifier::ConfigurationError, /disabled/)
+    end
+  end
+
+  it "raises on the media helpers when the adapter lacks media support" do
+    Dir.mktmpdir do |dir|
+      adapter = double(fetch_qr_code: "qr", connection_status: {})
+      config = build_config(path: File.join(dir, "session.json"), adapter: adapter)
+      provider = described_class.new(configuration: config)
+
+      expect { provider.fetch_media(message_id: "m1") }.to raise_error(WhatsAppNotifier::ConfigurationError, /media fetch/)
+      expect { provider.delete_media(message_id: "m1") }.to raise_error(WhatsAppNotifier::ConfigurationError, /media deletion/)
+    end
+  end
+
   it "logs out via adapter when enabled" do
     Dir.mktmpdir do |dir|
       adapter = double(fetch_qr_code: "qr", connection_status: {}, logout: { success: true })

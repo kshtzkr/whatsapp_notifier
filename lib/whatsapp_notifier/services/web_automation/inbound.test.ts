@@ -15,9 +15,12 @@ import {
     clearInbound,
     shouldCapture,
     normalizeInbound,
+    processInbound,
     resetInboundState,
-    type ChatResolver
+    type ChatResolver,
+    type InboundMsg
 } from './inbound';
+import { configureMedia, resolveMediaForMessage, mediaDiskBytes, resetMediaState } from './media';
 
 const root = mkdtempSync(join(tmpdir(), 'wa-inbound-'));
 const dirFor = (userId: string) => join(root, `session-user-${userId}`);
@@ -214,4 +217,149 @@ test('normalizeInbound maps fields and falls back on missing id', () => {
     expect(b.messageId).toBe(`${CUST}-42`);                  // fallback id
     expect(b.body).toBe('');
     expect(b.type).toBe('chat');
+});
+
+// ── processInbound (capture pipeline ordering) ──
+
+const LID_FROM = '125417440686124@lid';
+
+function mediaMsg(overrides: any = {}) {
+    return msg({
+        hasMedia: true,
+        type: 'image',
+        _data: { size: 10, mimetype: 'image/jpeg' },
+        getContact: async () => ({ pushname: 'Asha' }),
+        downloadMedia: async () => ({
+            data: Buffer.from('jpeg-bytes').toString('base64'),
+            mimetype: 'image/jpeg',
+            filename: 'beach.jpg'
+        }),
+        ...overrides
+    });
+}
+
+// Wire the real media store at a per-test root so "nothing written" is a
+// statement about the disk, not about a stub.
+function useMediaRoot(name: string) {
+    const mediaRoot = join(root, name);
+    configureMedia(() => mediaRoot);
+    resetMediaState();
+    return mediaRoot;
+}
+
+test('processInbound drops an unresolvable @lid BEFORE any media download', async () => {
+    const mediaRoot = useMediaRoot('media-lid-drop');
+    let resolveCalls = 0;
+    let downloads = 0;
+    const m = mediaMsg({
+        from: LID_FROM,
+        getContact: async () => ({ pushname: 'Asha' }), // no phone → unresolvable
+        downloadMedia: async () => { downloads += 1; return null; }
+    });
+
+    await processInbound('pi1', m, {
+        resolveMedia: (u, message) => { resolveCalls += 1; return resolveMediaForMessage(u, message); }
+    });
+
+    expect(resolveCalls).toBe(0);               // dropped before the download path
+    expect(downloads).toBe(0);
+    expect(drainInbound('pi1')).toEqual([]);
+    expect(existsSync(mediaRoot)).toBe(false);  // nothing written to disk
+    expect(mediaDiskBytes()).toBe(0);
+});
+
+test('processInbound resolves an @lid sender, then downloads for the kept message', async () => {
+    useMediaRoot('media-lid-kept');
+    rememberTarget('pi2', CUST); // resolved phone is a known outbound target
+    const m = mediaMsg({
+        from: LID_FROM,
+        getContact: async () => ({ pushname: 'Asha', number: '919999000001' })
+    });
+
+    const pushed: InboundMsg[] = [];
+    await processInbound('pi2', m, {
+        resolveMedia: resolveMediaForMessage,
+        push: (_u, inbound) => pushed.push(inbound)
+    });
+
+    const drained = drainInbound('pi2');
+    expect(drained.length).toBe(1);
+    expect(drained[0].from).toBe(CUST);                     // resolved to the phone
+    expect(drained[0].senderName).toBe('Asha');
+    expect(drained[0].mediaStatus).toBe('available');
+    expect(drained[0].mediaSize).toBe(10);
+    expect(pushed).toEqual(drained);                        // webhook saw the same payload
+    expect(loadTargets('pi2').has(LID_FROM)).toBe(true);    // alias allowlisted for backfill
+});
+
+test('processInbound keeps an @c.us message when the contact lookup fails', async () => {
+    useMediaRoot('media-contact-fail');
+    const m = msg({ getContact: async () => { throw new Error('boom'); } });
+
+    await processInbound('pi3', m, { resolveMedia: resolveMediaForMessage });
+
+    const drained = drainInbound('pi3');
+    expect(drained.length).toBe(1);
+    expect(drained[0].from).toBe(CUST);
+    expect('senderName' in drained[0]).toBe(false);
+});
+
+test('processInbound enqueues type-only when the media resolver reports a failure', async () => {
+    const m = mediaMsg({});
+    await processInbound('pi4', m, {
+        resolveMedia: async () => ({ mediaStatus: 'unavailable', mediaError: 'download_failed' })
+    });
+
+    const drained = drainInbound('pi4');
+    expect(drained.length).toBe(1);
+    expect(drained[0].hasMedia).toBe(true);
+    expect(drained[0].mediaStatus).toBe('unavailable');
+    expect(drained[0].mediaError).toBe('download_failed');
+});
+
+test('processInbound rejects filtered messages without resolving anything', async () => {
+    let resolveCalls = 0;
+    const deps = { resolveMedia: async () => { resolveCalls += 1; return { mediaStatus: 'available' as const }; } };
+
+    await processInbound('pi5', mediaMsg({ fromMe: true }), deps);
+    await processInbound('pi5', mediaMsg({ from: '12@g.us' }), deps);
+
+    expect(resolveCalls).toBe(0);
+    expect(drainInbound('pi5')).toEqual([]);
+});
+
+// 0.6.0 wire back-compat: text payloads must keep the exact five-field shape —
+// no media keys, not even hasMedia:false (hosts key-gate on hasMedia presence).
+test('normalizeInbound keeps the 0.6.0 shape for non-media messages', () => {
+    const plain = normalizeInbound(msg({ hasMedia: false }));
+    expect(Object.keys(plain).sort()).toEqual(['body', 'from', 'messageId', 'timestamp', 'type']);
+});
+
+test('normalizeInbound flags hasMedia even when no verdict is supplied', () => {
+    const out = normalizeInbound(msg({ hasMedia: true, type: 'image' }));
+    expect(out.hasMedia).toBe(true);
+    expect(out.type).toBe('image');
+    expect('mediaStatus' in out).toBe(false);                // verdict is capture-level
+});
+
+test('normalizeInbound merges an available media verdict into the payload', () => {
+    const out = normalizeInbound(msg({ hasMedia: true, type: 'image' }), {
+        mediaStatus: 'available', mediaMime: 'image/jpeg', mediaFilename: 'beach.jpg', mediaSize: 1024
+    });
+    expect(out).toEqual({
+        from: CUST, body: 'hello', messageId: 'true_919999000001@c.us_ABC',
+        timestamp: 1717000000, type: 'image',
+        hasMedia: true, mediaStatus: 'available',
+        mediaMime: 'image/jpeg', mediaFilename: 'beach.jpg', mediaSize: 1024
+    });
+});
+
+test('normalizeInbound merges an unavailable verdict with its typed reason', () => {
+    const out = normalizeInbound(msg({ hasMedia: true, type: 'video' }), {
+        mediaStatus: 'unavailable', mediaError: 'unsupported_type'
+    });
+    expect(out.hasMedia).toBe(true);
+    expect(out.mediaStatus).toBe('unavailable');
+    expect(out.mediaError).toBe('unsupported_type');
+    expect('mediaMime' in out).toBe(false);
 });

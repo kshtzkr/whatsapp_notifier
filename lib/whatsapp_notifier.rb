@@ -66,6 +66,14 @@ module WhatsAppNotifier
       client.fetch_inbound(provider: provider, metadata: metadata)
     end
 
+    def fetch_media(message_id:, provider: nil, metadata: {})
+      client.fetch_media(message_id: message_id, provider: provider, metadata: metadata)
+    end
+
+    def delete_media(message_id:, provider: nil, metadata: {})
+      client.delete_media(message_id: message_id, provider: provider, metadata: metadata)
+    end
+
     def logout(provider: nil, metadata: {})
       client.logout(provider: provider, metadata: metadata)
     end

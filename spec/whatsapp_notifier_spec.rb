@@ -94,6 +94,8 @@ RSpec.describe WhatsAppNotifier do
     allow(fake_client).to receive(:scan_qr).and_return("qr-code")
     allow(fake_client).to receive(:connection_status).and_return(state: "QR_REQUIRED")
     allow(fake_client).to receive(:fetch_inbound).and_return([{ from: "q@c.us" }])
+    allow(fake_client).to receive(:fetch_media).and_return(body: "bytes", mime: "image/jpeg", filename: nil, size: 5)
+    allow(fake_client).to receive(:delete_media).and_return(success: true)
     allow(fake_client).to receive(:logout).and_return(success: true)
     described_class.instance_variable_set(:@client, fake_client)
 
@@ -101,7 +103,11 @@ RSpec.describe WhatsAppNotifier do
     expect(described_class.scan_qr(provider: :web_automation, metadata: { user_id: 1 })).to eq("qr-code")
     expect(described_class.connection_status(provider: :web_automation, metadata: { user_id: 1 })).to include(state: "QR_REQUIRED")
     expect(described_class.fetch_inbound(provider: :web_automation, metadata: { user_id: 1 })).to eq([{ from: "q@c.us" }])
+    expect(described_class.fetch_media(message_id: "m1", provider: :web_automation, metadata: { user_id: 1 })).to include(mime: "image/jpeg")
+    expect(described_class.delete_media(message_id: "m1", provider: :web_automation, metadata: { user_id: 1 })).to eq(success: true)
     expect(described_class.logout(provider: :web_automation, metadata: { user_id: 1 })).to eq(success: true)
+    expect(fake_client).to have_received(:fetch_media).with(message_id: "m1", provider: :web_automation, metadata: { user_id: 1 })
+    expect(fake_client).to have_received(:delete_media).with(message_id: "m1", provider: :web_automation, metadata: { user_id: 1 })
   end
 
   it "fetches inbound through the module API end to end" do

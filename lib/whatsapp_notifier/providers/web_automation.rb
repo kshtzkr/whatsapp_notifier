@@ -61,6 +61,27 @@ module WhatsAppNotifier
         adapter.fetch_inbound(metadata: metadata)
       end
 
+      # Media helpers are optional adapter capabilities (added in v0.7.0) —
+      # same guard idiom as fetch_inbound so older adapters fail with a clear
+      # ConfigurationError rather than NoMethodError.
+      def fetch_media(message_id:, metadata: {})
+        raise ConfigurationError, "web automation provider is disabled" unless configuration.web_automation_enabled
+
+        adapter = configuration.web_adapter
+        raise ConfigurationError, "web_adapter does not support media fetch (upgrade to a fetch_media-capable adapter)" unless adapter.respond_to?(:fetch_media)
+
+        adapter.fetch_media(message_id: message_id, metadata: metadata)
+      end
+
+      def delete_media(message_id:, metadata: {})
+        raise ConfigurationError, "web automation provider is disabled" unless configuration.web_automation_enabled
+
+        adapter = configuration.web_adapter
+        raise ConfigurationError, "web_adapter does not support media deletion (upgrade to a delete_media-capable adapter)" unless adapter.respond_to?(:delete_media)
+
+        adapter.delete_media(message_id: message_id, metadata: metadata)
+      end
+
       def logout(metadata: {})
         raise ConfigurationError, "web automation provider is disabled" unless configuration.web_automation_enabled
 

@@ -19,6 +19,27 @@ export interface InboundMsg {
     messageId: string;
     timestamp: number;
     type: string;
+    // 0.7.0 media + sender enrichment. ALL optional and only present when the
+    // message actually carries them, so the wire format stays byte-compatible
+    // with 0.6.0 hosts (and 0.7.0 hosts can key-gate on hasMedia).
+    hasMedia?: boolean;
+    mediaStatus?: 'available' | 'unavailable';
+    mediaError?: string;
+    mediaMime?: string;
+    mediaFilename?: string;
+    mediaSize?: number;
+    senderName?: string;
+}
+
+// Media verdict merged into the payload by captureInbound — structurally
+// matches media.ts's MediaResolution without importing it (inbound stays the
+// dependency-free core).
+export interface InboundMediaInfo {
+    mediaStatus: 'available' | 'unavailable';
+    mediaError?: string;
+    mediaMime?: string;
+    mediaFilename?: string;
+    mediaSize?: number;
 }
 
 export const INBOUND_QUEUE_CAP = 1000;
@@ -113,15 +134,82 @@ export function shouldCapture(userId: string, msg: any): boolean {
     return true;
 }
 
-export function normalizeInbound(msg: any): InboundMsg {
+export function normalizeInbound(msg: any, media?: InboundMediaInfo): InboundMsg {
     const from: string = msg.from || '';
-    return {
+    const inbound: InboundMsg = {
         from,
         body: msg.body || '',
         messageId: (msg.id && msg.id._serialized) || `${from}-${msg.timestamp}`,
         timestamp: msg.timestamp || Math.floor(Date.now() / 1000),
         type: msg.type || 'chat'
     };
+    // Media keys are added ONLY for media messages so text payloads keep the
+    // exact 0.6.0 five-field shape (hosts key-gate on hasMedia presence).
+    if (msg.hasMedia) inbound.hasMedia = true;
+    if (media) Object.assign(inbound, media);
+    return inbound;
+}
+
+// ── Capture pipeline ──
+//
+// Extracted from index.ts so the ordering contract is unit-testable:
+// sanity filter → contact/@lid sender resolution (drop early) → media
+// download → normalize → enqueue → optional webhook push. The media resolver
+// is injected (media.ts's resolveMediaForMessage in production) so this file
+// stays the dependency-free core.
+export interface CaptureDeps {
+    resolveMedia: (userId: string, msg: any) => Promise<InboundMediaInfo>;
+    push?: (userId: string, msg: InboundMsg) => void;
+}
+
+export async function processInbound(userId: string, msg: any, deps: CaptureDeps) {
+    if (!shouldCapture(userId, msg)) return;
+
+    // One best-effort contact lookup feeds both the sender's display name
+    // and the @lid phone resolution. Failure must never drop the message —
+    // unless the sender is an unresolvable @lid (handled below).
+    let contact: any;
+    try {
+        contact = await msg.getContact();
+    } catch (e) {
+        console.error(`contact lookup failed for ${userId}`, e);
+    }
+
+    // Resolve the sender BEFORE downloading media. Newer WhatsApp delivers
+    // the reply's `from` as an @lid privacy id with no phone number, which
+    // the host can't match; if the contact can't supply the real phone the
+    // message is dropped — and a dropped message must not have cost a
+    // download that leaves up to 25MB of unreferenced bytes on disk.
+    const rawFrom: string = msg.from || '';
+    let from = rawFrom;
+    if (rawFrom.endsWith('@lid')) {
+        const num = contact && (contact.number || (contact.id && contact.id.user));
+        if (num) from = `${String(num).replace(/\D/g, '')}@c.us`;
+        // Still an @lid => no phone to match or scope by. Drop it rather than
+        // forward an unmatchable, unpurgeable plaintext body.
+        if (from.endsWith('@lid')) return;
+    }
+
+    // Only a kept message earns the download. Every resolver failure mode
+    // returns an 'unavailable' verdict instead of throwing, so the message
+    // still reaches the host type-only.
+    let media: InboundMediaInfo | undefined;
+    if (msg.hasMedia) {
+        media = await deps.resolveMedia(userId, msg);
+    }
+
+    const inbound = normalizeInbound(msg, media);
+    inbound.from = from;
+    const senderName = contact && (contact.pushname || contact.name || contact.shortName);
+    if (senderName) inbound.senderName = String(senderName);
+    if (rawFrom.endsWith('@lid')) {
+        // Known recipient replying from a privacy-number chat: allowlist the
+        // @lid chat id too, so the reconnect backfill can re-open this chat.
+        rememberLidAlias(userId, rawFrom, from);
+    }
+
+    enqueueInbound(userId, inbound);
+    if (deps.push) deps.push(userId, inbound);
 }
 
 // Minimal slice of whatsapp-web.js Client that backfill needs — a seam so the

@@ -16,14 +16,19 @@ import {
     InboundMsg,
     configureInbound,
     rememberTarget,
-    rememberLidAlias,
     backfillTargets,
-    enqueueInbound,
     drainInbound,
     clearInbound,
-    shouldCapture,
-    normalizeInbound
+    processInbound
 } from './inbound';
+import {
+    configureMedia,
+    resolveMediaForMessage,
+    sweepExpired,
+    clearUserMedia,
+    mediaGetResponse,
+    mediaDeleteResponse
+} from './media';
 
 const app = new Hono();
 const port = Number(process.env.PORT || 3001);
@@ -71,8 +76,10 @@ const initRetries = new InitRetryLimiter(MAX_INIT_RETRIES);
 const WEBHOOK_URL = process.env.WHATSAPP_WEBHOOK_URL;
 const WEBHOOK_TOKEN = process.env.WHATSAPP_WEBHOOK_TOKEN;
 
-// Tell the inbound core how to resolve each user's on-disk session dir.
+// Tell the inbound core how to resolve each user's on-disk session dir, and
+// the media store where downloaded inbound media lives (survives restarts).
 configureInbound(sessionDirForUser);
+configureMedia(() => join(SESSION_BASE_DIR, 'media'));
 
 async function pushWebhook(userId: string, msg: InboundMsg) {
     if (!WEBHOOK_URL) return;
@@ -90,32 +97,15 @@ async function pushWebhook(userId: string, msg: InboundMsg) {
     }
 }
 
-// Wrapper: sanity filter → normalize → resolve @lid → enqueue → optional webhook.
+// Wrapper around the testable pipeline in inbound.ts (sanity filter → sender
+// resolution with early @lid drop → media download → normalize → enqueue →
+// webhook). The catch keeps a single bad message from killing the listener.
 async function captureInbound(userId: string, msg: any) {
     try {
-        if (!shouldCapture(userId, msg)) return;
-        const inbound = normalizeInbound(msg);
-        // Newer WhatsApp delivers the reply's `from` as an @lid privacy id with
-        // no phone number, which the host can't match. Resolve it to the real
-        // phone via the contact so callers always get a phone-number @c.us.
-        if (inbound.from.endsWith('@lid')) {
-            const rawFrom = inbound.from;
-            try {
-                const contact = await msg.getContact();
-                const num = contact && (contact.number || (contact.id && contact.id.user));
-                if (num) inbound.from = `${String(num).replace(/\D/g, '')}@c.us`;
-            } catch (e) {
-                console.error(`lid->phone resolve failed for ${userId}`, e);
-            }
-            // Still an @lid => no phone to match or scope by. Drop it rather than
-            // forward an unmatchable, unpurgeable plaintext body.
-            if (inbound.from.endsWith('@lid')) return;
-            // Known recipient replying from a privacy-number chat: allowlist the
-            // @lid chat id too, so the reconnect backfill can re-open this chat.
-            rememberLidAlias(userId, rawFrom, inbound.from);
-        }
-        enqueueInbound(userId, inbound);
-        pushWebhook(userId, inbound);
+        await processInbound(userId, msg, {
+            resolveMedia: resolveMediaForMessage,
+            push: pushWebhook
+        });
     } catch (e) {
         console.error(`captureInbound error for ${userId}`, e);
     }
@@ -460,6 +450,14 @@ setInterval(() => {
             destroyClient(userId, wipe).catch(console.error);
         }
     }
+
+    // Evict downloaded inbound media past its TTL (and refresh the disk-cap
+    // accounting) on the same cadence — a sweep failure must not stop reaping.
+    try {
+        sweepExpired();
+    } catch (e) {
+        console.error('Media sweep failed', e);
+    }
 }, SWEEP_INTERVAL_MS);
 
 // API Routes
@@ -510,6 +508,11 @@ app.post('/logout/:userId', async (c) => {
     // anything captured between the last poll and this logout would sit in
     // memory and replay into the WRONG pairing if this userId pairs again.
     clearInbound(userId);
+    // Logout privacy contract: downloaded media belongs to the old pairing.
+    // Without this wipe, customer photos/documents stayed on disk (and
+    // fetchable via GET /media) for up to the 48h TTL after the operator
+    // severed the pairing.
+    clearUserMedia(userId);
     initializingClients.delete(userId);
     return c.json({ success: true });
 });
@@ -560,6 +563,16 @@ app.get('/inbound/:userId', async (c) => {
     await getOrCreateClient(userId);
     return c.json({ messages: drainInbound(userId) });
 });
+
+// GET/DELETE /media/:userId/:messageId — serve / evict downloaded inbound
+// media. Token-gated when WHATSAPP_WEBHOOK_TOKEN is set; ids are sanitized in
+// the store; NEVER calls getOrCreateClient (same fast-reject rule as /inbound:
+// fetching bytes for a never-paired user must not boot a Chromium).
+app.get('/media/:userId/:messageId', (c) =>
+    mediaGetResponse(c.req.param('userId'), c.req.param('messageId'), c.req.header('X-WA-Token'), WEBHOOK_TOKEN));
+
+app.delete('/media/:userId/:messageId', (c) =>
+    mediaDeleteResponse(c.req.param('userId'), c.req.param('messageId'), c.req.header('X-WA-Token'), WEBHOOK_TOKEN));
 
 
 console.log(`Starting Multi-User WhatsApp service (Bun Native) on port ${port}...`);
