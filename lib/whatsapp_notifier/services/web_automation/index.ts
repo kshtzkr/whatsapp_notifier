@@ -114,8 +114,10 @@ async function captureInbound(userId: string, msg: any) {
 async function backfillInbound(userId: string, client: Client) {
     // On reconnect, replay recent messages ONLY from chats we actually messaged
     // (the per-send allowlist) so a disconnect window doesn't drop a reply —
-    // without scraping every personal conversation on the linked number. Live
-    // replies are covered by the message_create handler; this is just recovery.
+    // without scraping every personal conversation on the linked number.
+    // fetchMessages returns BOTH directions, so operator-app (fromMe) messages
+    // typed during the window recover too. Live traffic is covered by the
+    // message_create handler; this is just recovery.
     await backfillTargets(userId, client, captureInbound);
 }
 
@@ -302,10 +304,13 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
         backfillInbound(userId, client).catch((e) => console.error(`Backfill failed for ${userId}`, e));
     });
 
-    // Capture inbound replies. Only 'message_create' — it fires reliably for
-    // every message across linked/multi-device sessions (plain 'message'
-    // silently never fires on some). shouldCapture drops our own sends (fromMe)
-    // + groups/status; the queue dedupes on message_id on the Rails side.
+    // Capture BOTH directions of every 1:1 chat. Only 'message_create' — it
+    // fires reliably for every message across linked/multi-device sessions
+    // (plain 'message' silently never fires on some) and, unlike 'message',
+    // also fires for operator-sent (fromMe) messages, which the host threads
+    // as the other half of the conversation since 0.8.0. shouldCapture drops
+    // groups/status; the host dedupes on message_id — including the fromMe
+    // echo of its own /send calls.
     client.on('message_create', (msg) => captureInbound(userId, msg));
 
     client.on('authenticated', () => {
