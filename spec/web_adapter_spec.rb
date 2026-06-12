@@ -319,6 +319,106 @@ RSpec.describe WhatsAppNotifier::WebAdapter do
       .to raise_error(/service request failed \(500\)/)
   end
 
+  it "lists chats with the token attached and maps the discovery keys" do
+    allow(ENV).to receive(:[]).and_call_original
+    allow(ENV).to receive(:[]).with("WHATSAPP_WEBHOOK_TOKEN").and_return("sekrit")
+    response = http_success(body: { "success" => true, "chats" => [
+      { "id" => "919@c.us", "name" => "Asha", "lastMessageAt" => 1_717_000_000 },
+      { "id" => "918@c.us", "name" => nil, "lastMessageAt" => nil }
+    ] })
+    captured = nil
+    http = double("http")
+    allow(http).to receive(:request) { |req| captured = req; response }
+    allow(Net::HTTP).to receive(:start) { |*_args, **_kwargs, &blk| blk.call(http) }
+
+    chats = adapter.list_chats(metadata: { user_id: "u-1" })
+
+    expect(chats).to eq([
+      { id: "919@c.us", name: "Asha", last_message_at: 1_717_000_000 },
+      { id: "918@c.us", name: nil, last_message_at: nil }
+    ])
+    expect(captured).to be_a(Net::HTTP::Get)
+    expect(captured.path).to eq("/chats/u-1")
+    expect(captured["X-WA-Token"]).to eq("sekrit")
+  end
+
+  it "accepts the snake_case last_message_at wire alias" do
+    body = { "chats" => [{ "id" => "919@c.us", "name" => "Asha", "last_message_at" => 9 }] }
+    allow(Net::HTTP).to receive(:start).and_return(http_success(body: body))
+
+    expect(adapter.list_chats(metadata: {}).first).to include(last_message_at: 9)
+  end
+
+  it "returns an empty chat list when the service omits the key" do
+    allow(Net::HTTP).to receive(:start).and_return(http_success(body: { "success" => true }))
+
+    expect(adapter.list_chats(metadata: {})).to eq([])
+  end
+
+  # An unpaired or not-ready user answers 401 — the standard non-2xx raise
+  # passes straight through to the caller.
+  it "raises the standard error when the chat list is unauthorized" do
+    allow(Net::HTTP).to receive(:start)
+      .and_return(http_failure(code: "401", body: JSON.generate({ error: "User not authenticated" })))
+
+    expect { adapter.list_chats(metadata: {}) }
+      .to raise_error(/service request failed \(401\): User not authenticated/)
+  end
+
+  it "fetches history with the token, posting the chat id and clamped limit" do
+    allow(ENV).to receive(:[]).and_call_original
+    allow(ENV).to receive(:[]).with("WHATSAPP_WEBHOOK_TOKEN").and_return("sekrit")
+    response = http_success(body: { "success" => true, "messages" => [
+      { "from" => "919@c.us", "body" => "old reply", "messageId" => "h1", "timestamp" => 1, "type" => "chat" },
+      { "from" => "919000000001@c.us", "to" => "919@c.us", "fromMe" => true,
+        "body" => "old send", "messageId" => "h2", "timestamp" => 2, "type" => "chat" },
+      { "from" => "919@c.us", "body" => "", "messageId" => "h3", "timestamp" => 3, "type" => "image",
+        "hasMedia" => true, "mediaStatus" => "unavailable", "mediaError" => "history" }
+    ] })
+    captured = nil
+    http = double("http")
+    allow(http).to receive(:request) { |req| captured = req; response }
+    allow(Net::HTTP).to receive(:start) { |*_args, **_kwargs, &blk| blk.call(http) }
+
+    messages = adapter.fetch_history(chat_id: "919@c.us", limit: 100_000, metadata: { user_id: "u-1" })
+
+    expect(captured).to be_a(Net::HTTP::Post)
+    expect(captured.path).to eq("/history/u-1")
+    expect(captured["X-WA-Token"]).to eq("sekrit")
+    expect(JSON.parse(captured.body)).to eq("chatId" => "919@c.us", "limit" => 200)
+
+    # Same mapper as fetch_inbound: two-way keys on the operator's messages,
+    # the by-design unavailable media verdict on history media.
+    expect(messages[0]).to eq(from: "919@c.us", body: "old reply", message_id: "h1", timestamp: 1, type: "chat")
+    expect(messages[1]).to include(from_me: true, to: "919@c.us", message_id: "h2")
+    expect(messages[2]).to include(has_media: true, media_status: "unavailable", media_error: "history")
+  end
+
+  it "clamps the history limit into 1..200 and defaults garbage to 50" do
+    bodies = []
+    http = double("http")
+    allow(http).to receive(:request) { |req| bodies << JSON.parse(req.body); http_success(body: { "messages" => [] }) }
+    allow(Net::HTTP).to receive(:start) { |*_args, **_kwargs, &blk| blk.call(http) }
+
+    adapter.fetch_history(chat_id: "919@c.us", metadata: {})              # default
+    adapter.fetch_history(chat_id: "919@c.us", limit: 0, metadata: {})    # below floor
+    adapter.fetch_history(chat_id: "919@c.us", limit: 201, metadata: {})  # above cap
+    adapter.fetch_history(chat_id: "919@c.us", limit: "120", metadata: {}) # numeric string
+    adapter.fetch_history(chat_id: "919@c.us", limit: 75.9, metadata: {}) # float floors
+    adapter.fetch_history(chat_id: "919@c.us", limit: "lots", metadata: {}) # garbage
+    adapter.fetch_history(chat_id: "919@c.us", limit: nil, metadata: {})  # nil
+
+    expect(bodies.map { |b| b["limit"] }).to eq([50, 1, 200, 120, 75, 50, 50])
+  end
+
+  it "raises the standard error when the history fetch fails" do
+    allow(Net::HTTP).to receive(:start)
+      .and_return(http_failure(code: "422", body: JSON.generate({ error: "`chatId` is required" })))
+
+    expect { adapter.fetch_history(chat_id: "12@g.us", metadata: {}) }
+      .to raise_error(/service request failed \(422\)/)
+  end
+
   it "logs out via the service" do
     allow(Net::HTTP).to receive(:start).and_return(http_success(body: { "success" => true }))
 

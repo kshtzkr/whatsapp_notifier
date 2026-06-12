@@ -74,6 +74,14 @@ module WhatsAppNotifier
       client.delete_media(message_id: message_id, provider: provider, metadata: metadata)
     end
 
+    def list_chats(provider: nil, metadata: {})
+      client.list_chats(provider: provider, metadata: metadata)
+    end
+
+    def fetch_history(chat_id:, limit: 50, provider: nil, metadata: {})
+      client.fetch_history(chat_id: chat_id, limit: limit, provider: provider, metadata: metadata)
+    end
+
     def logout(provider: nil, metadata: {})
       client.logout(provider: provider, metadata: metadata)
     end

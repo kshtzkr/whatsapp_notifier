@@ -131,6 +131,31 @@ module WhatsAppNotifier
       { success: response.fetch("success", false) }
     end
 
+    # Lists the paired number's 1:1 chats for history-sync discovery. Returns
+    # [{ id:, name:, last_message_at: }] newest-first; the service caps the
+    # list at its newest 500 and excludes groups/status/privacy chats. The
+    # route is token-gated like /media and raises the standard error on any
+    # non-2xx (401 when the user never paired or isn't ready).
+    def list_chats(metadata: {})
+      user_id = user_id_from(metadata)
+      response = request(:get, "/chats/#{user_id}")
+      Array(response["chats"]).map { |chat| map_chat_summary(chat) }
+    end
+
+    # Replays one chat's history through the service's live-capture
+    # normalizer and returns it synchronously (no queue, no webhook) —
+    # oldest-first, mapped exactly like fetch_inbound messages, including
+    # from_me/to on the operator's side of the conversation. History media
+    # arrives marked unavailable by design (media_error "history"): the
+    # service never bulk-downloads old media; live capture handles bytes
+    # going forward.
+    def fetch_history(chat_id:, limit: 50, metadata: {})
+      user_id = user_id_from(metadata)
+      body = { chatId: chat_id, limit: clamp_history_limit(limit) }
+      response = request(:post, "/history/#{user_id}", body: body)
+      Array(response["messages"]).map { |m| map_inbound_message(m) }
+    end
+
     # Logs the user out of WhatsApp and clears their saved session on the service.
     def logout(metadata: {})
       user_id = user_id_from(metadata)
@@ -138,10 +163,31 @@ module WhatsAppNotifier
       { success: response.fetch("success", false) }
     end
 
+    # Mirrors the service-side clamp (history.ts) so a host-passed limit can
+    # never balloon one request into a session-stalling bulk fetch.
+    HISTORY_LIMIT_DEFAULT = 50
+    HISTORY_LIMIT_RANGE = (1..200).freeze
+
     private
 
     def user_id_from(metadata)
       (metadata[:user_id] || metadata["user_id"] || "default").to_s
+    end
+
+    def clamp_history_limit(limit)
+      Integer(limit).clamp(HISTORY_LIMIT_RANGE.min, HISTORY_LIMIT_RANGE.max)
+    rescue ArgumentError, TypeError
+      # Non-integer garbage falls back to the default — the service does the
+      # same, so both layers agree on the effective page size.
+      HISTORY_LIMIT_DEFAULT
+    end
+
+    def map_chat_summary(chat)
+      {
+        id: chat["id"],
+        name: chat["name"],
+        last_message_at: chat.key?("lastMessageAt") ? chat["lastMessageAt"] : chat["last_message_at"]
+      }
     end
 
     def map_inbound_message(message)
