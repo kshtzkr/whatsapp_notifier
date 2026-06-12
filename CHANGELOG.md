@@ -1,5 +1,67 @@
 # Changelog
 
+## [0.8.0] - 2026-06-13
+
+Two-way capture: messages the operator sends from the WhatsApp app itself
+(phone/web) now reach the host, so threads show BOTH sides of every 1:1
+conversation — not just customer replies and platform sends.
+
+### Upgrade notes
+- **Hosts MUST dedupe self-echoes on `messageId` before ingesting fromMe
+  messages.** Every message sent through `POST /send` ALSO fires a
+  `message_create(fromMe)` event, which 0.8.0 now captures and delivers like
+  any other message — without a defense, each platform send duplicates as an
+  "operator app" message. The contract: store the `messageId` the 0.8.0
+  `/send` response returns against your outbound record (unique column), skip
+  any fromMe event whose id you already hold, and cover the race where the
+  echo beats your commit with an adopt window (match a recent same-body
+  outbound record with no id yet and adopt the id onto it instead of creating
+  a new message).
+- Capture now includes operator-sent 1:1 messages on the linked number —
+  by design (whole-conversation sync). Groups and status remain excluded by
+  the same counterparty jid gate; nothing changes for inbound payloads.
+
+### Service
+- `shouldCapture` keeps fromMe messages; every jid gate now validates the
+  COUNTERPARTY (`msg.to` for fromMe, `msg.from` otherwise) so the operator's
+  own @c.us jid can never vouch for a group/status post. isStatus and the
+  textual-type gates apply to both directions unchanged.
+- fromMe payloads carry optional `fromMe: true` + `to` (the counterparty chat
+  id the host threads on). Keys appear ONLY on operator-sent messages, so
+  inbound payloads stay byte-identical to 0.7.0 and hosts key-gate on
+  `fromMe` presence. The fallback `messageId` for id-less fromMe messages
+  keys on the counterparty (`${to}-${timestamp}`) — the operator's `from` is
+  shared by every chat and would collide across same-second sends.
+- The fromMe leg skips the `senderName` contact lookup (the sender is the
+  operator; saves a puppeteer roundtrip per message). Media resolution,
+  enqueue and webhook push are shared with the inbound leg — operator-sent
+  photos/documents sync through the existing `GET /media` path under the same
+  size caps and TTL.
+- A fromMe message to a brand-new number allowlists the chat for reconnect
+  backfill exactly like a `/send` recipient, so operator-initiated
+  conversations survive disconnect windows too. The backfill itself replays
+  BOTH directions (`fetchMessages` always returned own messages; the old
+  fromMe guard just dropped them).
+- fromMe messages to `@lid` privacy chats are dropped with a log: an @lid
+  counterparty carries no phone the host can match, and unlike inbound there
+  is no contact handle to resolve it through (`getContact()` resolves the
+  sender — the operator).
+- `POST /send` now returns `{ success: true, messageId }` with the real
+  serialized WhatsApp id of the sent message (the echo-dedupe key above), or
+  `messageId: null` when the library hands nothing back — never a fabricated
+  id, which would match no echo while still occupying the host's unique slot.
+
+### Adapter & Ruby API
+- `fetch_inbound` maps the new optional keys as `from_me` / `to` — only when
+  present on the wire, mirroring the media-key contract, so hosts stay no-op
+  against a pre-0.8.0 service mid-rollout.
+- `send_message` prefers the service-issued `messageId` (or `message_id`)
+  from the `/send` response as the result's `message_id`, falling back to the
+  existing `idempotency_key` / `local-<ts>` fabrication against 0.7.0
+  services. `Result#message_id` therefore carries the real WhatsApp id once
+  the 0.8.0 service is deployed.
+- The ejected service (install generator) now ships `send.ts`.
+
 ## [0.7.0] - 2026-06-11
 
 Inbound media: the service now downloads customer images, voice notes and
