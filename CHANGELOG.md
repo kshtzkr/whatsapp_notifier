@@ -62,6 +62,44 @@ conversation — not just customer replies and platform sends.
   the 0.8.0 service is deployed.
 - The ejected service (install generator) now ships `send.ts`.
 
+### Chat history
+Sync OLD conversations — chats that predate the pairing — on demand.
+
+- `GET /chats/:userId` lists the paired number's 1:1 chats for discovery:
+  `{ success: true, chats: [{ id, name, lastMessageAt }] }`, newest first,
+  **capped at the 500 most recent** (a long-lived personal number can hold
+  thousands of chats; the host only needs the recent ones to offer for
+  syncing). `@c.us` ids only — groups, status and `@lid` privacy chats are
+  excluded. `name` is best-effort (null when WhatsApp has none);
+  `lastMessageAt` is epoch seconds or null.
+- `POST /history/:userId` with `{ chatId, limit }` replays one chat's recent
+  messages through the live-capture normalizer and returns them DIRECTLY —
+  `{ success: true, messages: [...] }`, oldest first; no queue, no webhook
+  (the host ingests the response synchronously). Both directions are
+  replayed: operator-sent messages carry `fromMe` + `to` exactly like live
+  capture. `chatId` accepts a bare number (normalized to `@c.us` like
+  `/send`) and must be a 1:1 id; `limit` is clamped to 1..200 (default 50).
+  Messages failing the live `shouldCapture` gate (system events, status) are
+  skipped, and the synced chat joins the reconnect-backfill allowlist like a
+  `/send` recipient.
+- **History media is marked, never downloaded — by design.** Media-typed
+  messages return `hasMedia: true, mediaStatus: 'unavailable', mediaError:
+  'history'`: bulk-downloading a photo-heavy chat's history would blow the
+  media disk caps and stall the session behind sequential downloads. Live
+  capture keeps downloading media for everything that arrives after the sync.
+- Both routes gate exactly like `POST /send` (paired fast-reject before any
+  client exists, then AUTHENTICATED + ready) and additionally enforce
+  `X-WA-Token` like `/media` when `WHATSAPP_WEBHOOK_TOKEN` is set — they
+  expose whole conversations, not just the caller's own queue.
+- Ruby API: `WhatsAppNotifier.list_chats(metadata:)` returns
+  `[{ id:, name:, last_message_at: }]`;
+  `WhatsAppNotifier.fetch_history(chat_id:, limit: 50, metadata:)` returns
+  messages mapped exactly like `fetch_inbound` (including `from_me` / `to`
+  and the media keys). Both raise on any non-2xx — 401 (never paired / not
+  ready) included. The adapter mirrors the service's limit clamp so a wild
+  host value can't balloon a request.
+- The ejected service now ships `history.ts`.
+
 ## [0.7.0] - 2026-06-11
 
 Inbound media: the service now downloads customer images, voice notes and
