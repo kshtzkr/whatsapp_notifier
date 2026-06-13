@@ -7,16 +7,30 @@ Two-way capture: messages the operator sends from the WhatsApp app itself
 conversation — not just customer replies and platform sends.
 
 ### Upgrade notes
-- **Hosts MUST dedupe self-echoes on `messageId` before ingesting fromMe
-  messages.** Every message sent through `POST /send` ALSO fires a
-  `message_create(fromMe)` event, which 0.8.0 now captures and delivers like
-  any other message — without a defense, each platform send duplicates as an
-  "operator app" message. The contract: store the `messageId` the 0.8.0
+- **Deploy order: upgrade the HOST first, then the service.** A 0.8.0
+  service paired with a pre-0.8.0 host delivers fromMe payloads the host
+  doesn't key-gate on — an operator send in a self-test campaign comes back
+  through `/inbound` and is ingested as a phantom customer reply. A host that
+  understands `fromMe` is a no-op against a 0.7.0 service, so host → service
+  is the safe order.
+- **Hosts MUST still dedupe self-echoes on `messageId`** even though the
+  service now suppresses its own `/send` echoes (see Service below): the
+  suppression registry is in-memory and best-effort, so an echo landing after
+  a service restart — or firing before `/send` finished registering its id —
+  flows through. The contract is unchanged: store the `messageId` the 0.8.0
   `/send` response returns against your outbound record (unique column), skip
   any fromMe event whose id you already hold, and cover the race where the
   echo beats your commit with an adopt window (match a recent same-body
   outbound record with no id yet and adopt the id onto it instead of creating
-  a new message).
+  a new message). Note the service's send retry can deliver a message more
+  than once upstream (pre-existing behaviour) — the adopt logic should
+  tolerate an echo that matches no pending record rather than erroring.
+- **Set `WHATSAPP_WEBHOOK_TOKEN` in production.** The new `GET /chats` and
+  `POST /history` routes enforce `X-WA-Token` ONLY when that env var is set
+  (same opt-in rule as `/media`) — and they expose whole-conversation
+  content, not just the caller's own queue. An untokened production service
+  serves every paired number's chat list and history to anyone who can reach
+  the port.
 - Capture now includes operator-sent 1:1 messages on the linked number —
   by design (whole-conversation sync). Groups and status remain excluded by
   the same counterparty jid gate; nothing changes for inbound payloads.
@@ -26,12 +40,24 @@ conversation — not just customer replies and platform sends.
   COUNTERPARTY (`msg.to` for fromMe, `msg.from` otherwise) so the operator's
   own @c.us jid can never vouch for a group/status post. isStatus and the
   textual-type gates apply to both directions unchanged.
+- **Self-send echoes are suppressed service-side.** `POST /send` registers
+  the sent message id in a per-user, bounded (200 ids), 10-minute-TTL
+  in-memory registry; the fromMe capture leg drops registry hits ENTIRELY —
+  no media resolution (a media send no longer re-downloads its own
+  attachment on the sending Chromium and burns the shared 5GB disk cap on
+  bytes the host never fetches), no queue slot, no webhook push. Messages
+  typed on the phone and reconnect-backfill replays are never in the
+  registry and flow through unchanged; hosts keep the id-dedupe for the
+  restart gap (see upgrade notes). Logout clears the registry with the rest
+  of the pairing state.
 - fromMe payloads carry optional `fromMe: true` + `to` (the counterparty chat
   id the host threads on). Keys appear ONLY on operator-sent messages, so
   inbound payloads stay byte-identical to 0.7.0 and hosts key-gate on
   `fromMe` presence. The fallback `messageId` for id-less fromMe messages
   keys on the counterparty (`${to}-${timestamp}`) — the operator's `from` is
-  shared by every chat and would collide across same-second sends.
+  shared by every chat and would collide across same-second sends. The media
+  store files id-less fromMe media under the same counterparty key, so the
+  bytes stay addressable by the exact id the wire advertised.
 - The fromMe leg skips the `senderName` contact lookup (the sender is the
   operator; saves a puppeteer roundtrip per message). Media resolution,
   enqueue and webhook push are shared with the inbound leg — operator-sent
