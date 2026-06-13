@@ -126,9 +126,9 @@ export function drainInbound(userId: string): InboundMsg[] {
 // Every POST /send fires its own fromMe message_create echo. Letting that
 // echo run the capture pipeline is pure waste: a media send re-downloads the
 // attachment it just uploaded (up to the 30s download budget on the sending
-// Chromium) and stores bytes nobody will ever fetch against the shared disk
-// cap — at campaign scale those phantom copies starve REAL customer inbound
-// media (downloadPolicy starts answering disk_full). The echo's payload is
+// Chromium) and stores bytes nobody will ever fetch against the per-user
+// media cap — at campaign scale those phantom copies churn the cap, evicting
+// REAL customer inbound media the operator still wants. The echo's payload is
 // redundant too: the /send response already handed the host this exact
 // messageId, and the host's id-dedupe would discard the echo anyway — so a
 // registry hit is suppressed ENTIRELY (no media resolution, no enqueue, no
