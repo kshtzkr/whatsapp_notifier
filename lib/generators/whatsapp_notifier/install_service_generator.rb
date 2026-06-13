@@ -12,10 +12,12 @@ module WhatsAppNotifier
       # host app. The app rebuilds deps with `bun install`.
       SERVICE_FILES = %w[
         index.ts
+        history.ts
         inbound.ts
         init_gate.ts
         media.ts
         metrics.ts
+        send.ts
         sessions.ts
         package.json
         bun.lock

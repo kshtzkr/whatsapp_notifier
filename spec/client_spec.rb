@@ -77,7 +77,8 @@ RSpec.describe WhatsAppNotifier::Client do
         fetch_qr_code: "qr",
         connection_status: { state: "AUTHENTICATED", authenticated: true },
         fetch_media: { body: "bytes", mime: "image/jpeg", filename: nil, size: 5 },
-        delete_media: { success: true }
+        delete_media: { success: true },
+        refetch_media: { mime: "image/jpeg", filename: nil, size: 5, status: "available" }
       )
       client = described_class.new(configuration: config)
 
@@ -85,6 +86,32 @@ RSpec.describe WhatsAppNotifier::Client do
         .to include(body: "bytes", size: 5)
       expect(client.delete_media(message_id: "m1", provider: :web_automation, metadata: { user_id: 1 }))
         .to eq(success: true)
+      expect(client.refetch_media(message_id: "m1", chat_id: "919@c.us", provider: :web_automation, metadata: { user_id: 1 }))
+        .to include(status: "available")
+    end
+  end
+
+  it "delegates list_chats and fetch_history to the provider" do
+    Dir.mktmpdir do |dir|
+      config.provider = :web_automation
+      config.web_automation_enabled = true
+      config.web_session_path = File.join(dir, "session.json")
+      adapter = double(
+        send_message: { success: true, session: {} },
+        fetch_qr_code: "qr",
+        connection_status: { state: "AUTHENTICATED", authenticated: true },
+        list_chats: [{ id: "919@c.us", name: "Asha", last_message_at: 9 }],
+        fetch_history: [{ from: "919@c.us", body: "old", message_id: "h1" }]
+      )
+      config.web_adapter = adapter
+      client = described_class.new(configuration: config)
+
+      expect(client.list_chats(provider: :web_automation, metadata: { user_id: 1 }))
+        .to eq([{ id: "919@c.us", name: "Asha", last_message_at: 9 }])
+      expect(client.fetch_history(chat_id: "919@c.us", provider: :web_automation, metadata: { user_id: 1 }))
+        .to eq([{ from: "919@c.us", body: "old", message_id: "h1" }])
+      # The default page size survives the delegation chain untouched.
+      expect(adapter).to have_received(:fetch_history).with(chat_id: "919@c.us", limit: 50, metadata: { user_id: 1 })
     end
   end
 

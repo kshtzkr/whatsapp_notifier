@@ -34,7 +34,7 @@ export interface MediaMeta {
     capturedAt: number; // epoch ms
 }
 
-export type MediaSkipReason = 'unsupported_type' | 'too_large' | 'disk_full';
+export type MediaSkipReason = 'unsupported_type' | 'too_large';
 export type MediaFailureReason = MediaSkipReason | 'expired' | 'download_failed' | 'invalid_id';
 
 // The verdict captureInbound merges into the inbound payload. Structurally
@@ -76,6 +76,13 @@ export function maxDiskBytes(): number {
     return envLimit('WHATSAPP_MEDIA_MAX_DISK_BYTES', 5 * 1024 * 1024 * 1024); // 5GB
 }
 
+// Per-user rolling cap (default 1GB). This is the cap that actually shapes disk
+// use: maxDiskBytes() is only an absolute global backstop now. NaN-safe like
+// the others so a malformed env can't silently disable eviction.
+export function maxUserBytes(): number {
+    return envLimit('WHATSAPP_MEDIA_MAX_USER_BYTES', 1024 * 1024 * 1024); // 1GB
+}
+
 // ── Root + cap accounting ──
 
 // index.ts wires this to <SESSION_BASE_DIR>/media; tests to a tmp dir.
@@ -107,6 +114,24 @@ function computeDiskBytes(): number {
             }
         }
     } catch (_) { /* media root not created yet → nothing stored */ }
+    return total;
+}
+
+// Payload bytes stored for ONE user — sidecars excluded, exactly as
+// computeDiskBytes counts them, so the per-user total and the global total
+// stay on the same scale and the eviction decrement keeps cachedDiskBytes
+// honest.
+export function userDirBytes(userId: string): number {
+    const safeUser = sanitizeId(userId);
+    if (!safeUser) return 0;
+    let total = 0;
+    try {
+        const dir = join(mediaRootResolver(), safeUser);
+        for (const file of readdirSync(dir)) {
+            if (isSidecarName(file)) continue;
+            try { total += statSync(join(dir, file)).size; } catch (_) { /* raced a delete */ }
+        }
+    } catch (_) { /* user dir not created yet → nothing stored */ }
     return total;
 }
 
@@ -170,11 +195,64 @@ export function writeMedia(
         };
         writeFileSync(paths.metaPath, JSON.stringify(sidecar));
         if (cachedDiskBytes !== null) cachedDiskBytes += data.byteLength;
+        // WhatsApp's own model: keep the recent media, roll the old off. The
+        // newly written file pushed this user over their cap? Evict their
+        // oldest until they fit again. An evicted item is not lost — the host
+        // re-downloads it on demand via POST /media/:userId/refetch when an
+        // operator opens that bubble.
+        enforceUserCap(userId);
         return true;
     } catch (e) {
         console.error(`Failed to persist media ${messageId} for ${userId}`, e);
         return false;
     }
+}
+
+// Roll the user back under maxUserBytes() by deleting their OLDEST media pair
+// (by file mtime — same pairing/ordering logic as sweepExpired) one at a time.
+// Bounded by the file count: each pass either deletes one pair or stops, so it
+// can never spin (a user already at/under the cap exits immediately, and a
+// single oversize file that alone exceeds the cap is deleted once and the loop
+// ends with the dir empty). cachedDiskBytes is decremented per eviction so
+// downloadPolicy's global backstop and mediaDiskBytes stay accurate.
+export function enforceUserCap(userId: string): number {
+    const safeUser = sanitizeId(userId);
+    if (!safeUser) return 0;
+    const cap = maxUserBytes();
+    const dir = join(mediaRootResolver(), safeUser);
+
+    let evicted = 0;
+    let total = userDirBytes(userId);
+    // Bound the loop by the directory's file count — defensive belt over the
+    // total-shrinks-each-pass invariant.
+    let guard = 0;
+    while (total > cap) {
+        const oldest = oldestMediaName(dir);
+        if (!oldest) break; // nothing left to evict (cap smaller than 0 bytes is impossible)
+        // deleteMedia decrements cachedDiskBytes by the payload size for us.
+        deleteMedia(userId, oldest);
+        evicted += 1;
+        total = userDirBytes(userId);
+        guard += 1;
+        if (guard > 100000) break; // pathological safety valve
+    }
+    return evicted;
+}
+
+// The user's oldest media payload by capturedAt (sidecar) / mtime (fallback) —
+// same age source sweepExpired uses — or null when the dir holds no payloads.
+// Sidecars are skipped; an orphaned sidecar is left for sweepExpired to reap.
+function oldestMediaName(dir: string): string | null {
+    let oldestName: string | null = null;
+    let oldestAt = Infinity;
+    try {
+        for (const file of readdirSync(dir)) {
+            if (isSidecarName(file)) continue;
+            const at = capturedAtFor(join(dir, file), `${join(dir, file)}${SIDECAR_SUFFIX}`);
+            if (at < oldestAt) { oldestAt = at; oldestName = file; }
+        }
+    } catch (_) { /* dir gone → nothing to evict */ }
+    return oldestName;
 }
 
 // Returns the sidecar when BOTH the bytes and the sidecar are present —
@@ -257,7 +335,14 @@ export function downloadPolicy(type: string, size: number, viewOnce = false): Me
     if (viewOnce || !DOWNLOADABLE_TYPES.has(type)) return { download: false, reason: 'unsupported_type' };
     const cap = type === 'document' ? maxDocumentBytes() : INLINE_MEDIA_MAX_BYTES;
     if (size > cap) return { download: false, reason: 'too_large' };
-    if (mediaDiskBytes() + size > maxDiskBytes()) return { download: false, reason: 'disk_full' };
+    // No disk check here any more. A user is NEVER skipped on disk grounds:
+    // the per-user 1GB cap is enforced AFTER each successful write by
+    // enforceUserCap, which rolls the user's OLDEST media off (WhatsApp's
+    // tap-to-download model — an evicted item re-downloads on demand). Because
+    // we download-then-evict, we only ever write at most one per-message cap
+    // (≤25MB) over the limit before rolling back under it — harmless. The
+    // per-MESSAGE size gate above still stands; maxDiskBytes() remains only an
+    // absolute global backstop that the per-user cap keeps us far beneath.
     return { download: true };
 }
 
@@ -320,8 +405,13 @@ export async function resolveMediaForMessage(
     deps: { timeoutMs?: number } = {}
 ): Promise<MediaResolution> {
     // Must mirror normalizeInbound's messageId fallback (inbound.ts) so the
-    // stored file is addressable by the id the host received.
-    const messageId = (msg?.id && msg.id._serialized) || `${msg?.from || ''}-${msg?.timestamp}`;
+    // stored file is addressable by the id the host received. Like there, the
+    // fallback keys on the COUNTERPARTY: on fromMe the `from` is the
+    // operator's own jid, shared by every chat — keying on it would store the
+    // bytes under one id while the wire advertises another (host GET 404s),
+    // and two same-second sends to different customers would collide on disk.
+    const counterparty = (msg?.fromMe ? msg?.to : msg?.from) || '';
+    const messageId = (msg?.id && msg.id._serialized) || `${counterparty}-${msg?.timestamp}`;
     if (!mediaPaths(userId, messageId)) {
         return { mediaStatus: 'unavailable', mediaError: 'invalid_id' };
     }

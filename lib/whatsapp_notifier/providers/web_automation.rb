@@ -82,6 +82,39 @@ module WhatsAppNotifier
         adapter.delete_media(message_id: message_id, metadata: metadata)
       end
 
+      # On-demand media re-download (added in v0.8.0) — same guard idiom as
+      # fetch_media so older adapters fail with a clear ConfigurationError
+      # rather than NoMethodError.
+      def refetch_media(message_id:, chat_id:, metadata: {})
+        raise ConfigurationError, "web automation provider is disabled" unless configuration.web_automation_enabled
+
+        adapter = configuration.web_adapter
+        raise ConfigurationError, "web_adapter does not support media refetch (upgrade to a refetch_media-capable adapter)" unless adapter.respond_to?(:refetch_media)
+
+        adapter.refetch_media(message_id: message_id, chat_id: chat_id, metadata: metadata)
+      end
+
+      # Chat-history helpers are optional adapter capabilities (added in
+      # v0.8.0) — same guard idiom as fetch_media so older adapters fail with
+      # a clear ConfigurationError rather than NoMethodError.
+      def list_chats(metadata: {})
+        raise ConfigurationError, "web automation provider is disabled" unless configuration.web_automation_enabled
+
+        adapter = configuration.web_adapter
+        raise ConfigurationError, "web_adapter does not support chat listing (upgrade to a list_chats-capable adapter)" unless adapter.respond_to?(:list_chats)
+
+        adapter.list_chats(metadata: metadata)
+      end
+
+      def fetch_history(chat_id:, limit: 50, metadata: {})
+        raise ConfigurationError, "web automation provider is disabled" unless configuration.web_automation_enabled
+
+        adapter = configuration.web_adapter
+        raise ConfigurationError, "web_adapter does not support history replay (upgrade to a fetch_history-capable adapter)" unless adapter.respond_to?(:fetch_history)
+
+        adapter.fetch_history(chat_id: chat_id, limit: limit, metadata: metadata)
+      end
+
       def logout(metadata: {})
         raise ConfigurationError, "web automation provider is disabled" unless configuration.web_automation_enabled
 

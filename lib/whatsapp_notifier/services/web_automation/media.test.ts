@@ -16,6 +16,9 @@ import {
     mediaTtlMs,
     maxDocumentBytes,
     maxDiskBytes,
+    maxUserBytes,
+    userDirBytes,
+    enforceUserCap,
     downloadPolicy,
     sweepExpired,
     resolveMediaForMessage,
@@ -29,7 +32,7 @@ const root = mkdtempSync(join(tmpdir(), 'wa-media-'));
 let mediaRoot: string;
 let caseId = 0;
 
-const ENV_KEYS = ['WHATSAPP_MEDIA_TTL_MS', 'WHATSAPP_MEDIA_MAX_BYTES', 'WHATSAPP_MEDIA_MAX_DISK_BYTES'];
+const ENV_KEYS = ['WHATSAPP_MEDIA_TTL_MS', 'WHATSAPP_MEDIA_MAX_BYTES', 'WHATSAPP_MEDIA_MAX_DISK_BYTES', 'WHATSAPP_MEDIA_MAX_USER_BYTES'];
 const savedEnv: Record<string, string | undefined> = {};
 
 beforeEach(() => {
@@ -282,10 +285,12 @@ test('malformed limit envs fall back to the defaults instead of NaN', () => {
     process.env.WHATSAPP_MEDIA_TTL_MS = '2 days';
     process.env.WHATSAPP_MEDIA_MAX_BYTES = 'garbage';
     process.env.WHATSAPP_MEDIA_MAX_DISK_BYTES = '50GB';
+    process.env.WHATSAPP_MEDIA_MAX_USER_BYTES = '1 gig';
 
     expect(mediaTtlMs()).toBe(48 * 60 * 60 * 1000);
     expect(maxDocumentBytes()).toBe(25 * 1024 * 1024);
     expect(maxDiskBytes()).toBe(5 * 1024 * 1024 * 1024);
+    expect(maxUserBytes()).toBe(1024 * 1024 * 1024);
 
     // The guards stay live: the document cap still rejects oversize media...
     expect(downloadPolicy('document', 25 * 1024 * 1024 + 1))
@@ -296,13 +301,151 @@ test('malformed limit envs fall back to the defaults instead of NaN', () => {
     expect(sweepExpired(Date.now() + 48 * 60 * 60 * 1000 + 1000)).toBe(1);
 });
 
-test('downloadPolicy refuses a download that would blow the disk cap', () => {
-    expect(maxDiskBytes()).toBe(5 * 1024 * 1024 * 1024);
+// The per-user cap is now enforced post-write by eviction, so downloadPolicy
+// NEVER skips a download on disk grounds — a user is never starved. Even with
+// a tiny disk cap and a near-full disk, the policy still says download (the
+// post-write enforceUserCap rolls the oldest off instead).
+test('downloadPolicy never refuses on disk grounds (per-user eviction replaces starvation)', () => {
     process.env.WHATSAPP_MEDIA_MAX_DISK_BYTES = '12';
+    process.env.WHATSAPP_MEDIA_MAX_USER_BYTES = '12';
     writeMedia(USER, 'taken', bytes('1234567890'), { mime: 'image/png' }); // 10 bytes used
 
     expect(downloadPolicy('image', 2)).toEqual({ download: true });
-    expect(downloadPolicy('image', 3)).toEqual({ download: false, reason: 'disk_full' });
+    expect(downloadPolicy('image', 3)).toEqual({ download: true });  // would-blow-disk still allowed
+    expect(downloadPolicy('image', INLINE_MEDIA_MAX_BYTES)).toEqual({ download: true }); // up to the per-message cap
+
+    // ...but the per-MESSAGE size gate still rejects oversize media.
+    expect(downloadPolicy('image', INLINE_MEDIA_MAX_BYTES + 1)).toEqual({ download: false, reason: 'too_large' });
+});
+
+// ── maxUserBytes / userDirBytes / enforceUserCap (per-user rolling cap) ──
+
+// Backdate a stored item's capturedAt so the oldest-first eviction order is
+// deterministic regardless of write timing (sub-ms writes share a clock).
+function backdate(userId: string, messageId: string, capturedAt: number) {
+    const p = mediaPaths(userId, messageId)!;
+    const sidecar = JSON.parse(readFileSync(p.metaPath, 'utf8'));
+    sidecar.capturedAt = capturedAt;
+    writeFileSync(p.metaPath, JSON.stringify(sidecar));
+}
+
+test('maxUserBytes defaults to 1GB', () => {
+    expect(maxUserBytes()).toBe(1024 * 1024 * 1024);
+    process.env.WHATSAPP_MEDIA_MAX_USER_BYTES = '2048';
+    expect(maxUserBytes()).toBe(2048);
+});
+
+test('userDirBytes counts only that user payloads, sidecars excluded', () => {
+    writeMedia(USER, 'm1', bytes('12345'), { mime: 'image/png' });
+    writeMedia(USER, 'm2', bytes('1234567890'), { mime: 'image/png' });
+    writeMedia('7', 'other', bytes('123'), { mime: 'image/png' });
+
+    expect(userDirBytes(USER)).toBe(15);   // 5 + 10, sidecar JSON not counted
+    expect(userDirBytes('7')).toBe(3);     // scoped per user
+    expect(userDirBytes('never')).toBe(0); // no dir yet
+    expect(userDirBytes('..')).toBe(0);    // unsanitizable id
+});
+
+// Writing past 1GB (here: a tiny cap) evicts THAT user's OLDEST media, oldest
+// first, until they fit — the new media survives. Stored under a generous cap
+// and backdated to fix the age order, then enforced under the tight cap so the
+// eviction is deterministic (not at the mercy of the inline write hook).
+test('writing past the user cap evicts the user oldest media first', () => {
+    process.env.WHATSAPP_MEDIA_MAX_USER_BYTES = '1000'; // generous: no inline eviction
+    writeMedia(USER, 'm1', bytes('12345'), { mime: 'image/png' }); backdate(USER, 'm1', 1); // 5
+    writeMedia(USER, 'm2', bytes('12345'), { mime: 'image/png' }); backdate(USER, 'm2', 2); // 5
+    writeMedia(USER, 'm3', bytes('12345'), { mime: 'image/png' }); backdate(USER, 'm3', 3); // 5
+    expect(mediaDiskBytes()).toBe(15);
+
+    // Tighten to 12 and enforce: 15 > 12 → evict the oldest (m1, 5) → 10 ≤ 12.
+    process.env.WHATSAPP_MEDIA_MAX_USER_BYTES = '12';
+    expect(enforceUserCap(USER)).toBe(1);
+
+    expect(mediaExists(USER, 'm1')).toBeNull();        // oldest gone
+    expect(mediaExists(USER, 'm2')).not.toBeNull();
+    expect(mediaExists(USER, 'm3')).not.toBeNull();
+    expect(userDirBytes(USER)).toBe(10);
+    expect(mediaDiskBytes()).toBe(10);                 // global total kept honest
+});
+
+test('enforceUserCap evicts multiple oldest items when the dir blows well past the cap', () => {
+    process.env.WHATSAPP_MEDIA_MAX_USER_BYTES = '1000'; // generous during the writes
+    writeMedia(USER, 'a', bytes('111'), { mime: 'image/png' }); backdate(USER, 'a', 1); // 3
+    writeMedia(USER, 'b', bytes('222'), { mime: 'image/png' }); backdate(USER, 'b', 2); // 3
+    writeMedia(USER, 'c', bytes('3333333333'), { mime: 'image/png' }); backdate(USER, 'c', 3); // 10
+
+    // 16 bytes, cap 6 → evict a (3) → 13, evict b (3) → 10, evict c (10) → 0.
+    // Even the single 10-byte file exceeds the cap, so the loop empties the dir.
+    process.env.WHATSAPP_MEDIA_MAX_USER_BYTES = '6';
+    expect(enforceUserCap(USER)).toBe(3);
+    expect(userDirBytes(USER)).toBe(0);
+    expect(mediaDiskBytes()).toBe(0);
+});
+
+test('enforceUserCap evicts one user without touching another (independent caps)', () => {
+    process.env.WHATSAPP_MEDIA_MAX_USER_BYTES = '1000'; // generous during the writes
+    writeMedia(USER, 'a', bytes('111'), { mime: 'image/png' }); backdate(USER, 'a', 1); // 3
+    writeMedia(USER, 'b', bytes('222'), { mime: 'image/png' }); backdate(USER, 'b', 2); // 3
+    writeMedia('7', 'x', bytes('12345'), { mime: 'image/png' }); backdate('7', 'x', 1); // 5
+    writeMedia('7', 'y', bytes('12345'), { mime: 'image/png' }); backdate('7', 'y', 2); // +5 = 10
+
+    // Cap 6: USER (6 bytes) is exactly at the cap → no eviction; user 7 (10) is over.
+    process.env.WHATSAPP_MEDIA_MAX_USER_BYTES = '6';
+    expect(enforceUserCap(USER)).toBe(0);
+    expect(mediaExists(USER, 'a')).not.toBeNull();
+    expect(mediaExists(USER, 'b')).not.toBeNull();
+
+    // User 7 over cap evicts only user 7 oldest; USER untouched.
+    expect(enforceUserCap('7')).toBe(1);
+    expect(mediaExists('7', 'x')).toBeNull();     // user 7 oldest gone
+    expect(mediaExists('7', 'y')).not.toBeNull();
+    expect(userDirBytes(USER)).toBe(6);           // the other user is intact
+});
+
+test('enforceUserCap is a no-op for a user under the cap, an empty dir and bad ids', () => {
+    process.env.WHATSAPP_MEDIA_MAX_USER_BYTES = '100';
+    writeMedia(USER, 'm1', bytes('12345'), { mime: 'image/png' });
+
+    expect(enforceUserCap(USER)).toBe(0);         // under cap
+    expect(mediaExists(USER, 'm1')).not.toBeNull();
+    expect(enforceUserCap('never-stored')).toBe(0); // no dir
+    expect(enforceUserCap('..')).toBe(0);           // unsanitizable id
+});
+
+// NaN cap → enforceUserCap must still use the 1GB default, never treat NaN as
+// "0, evict everything" or "Infinity, never evict via a broken comparison".
+test('enforceUserCap falls back to the 1GB default on a malformed cap env', () => {
+    process.env.WHATSAPP_MEDIA_MAX_USER_BYTES = 'one gigabyte';
+    writeMedia(USER, 'm1', bytes('12345'), { mime: 'image/png' });
+
+    expect(maxUserBytes()).toBe(1024 * 1024 * 1024);
+    expect(enforceUserCap(USER)).toBe(0);         // 5 bytes ≪ 1GB → nothing evicted
+    expect(mediaExists(USER, 'm1')).not.toBeNull();
+});
+
+// The post-write hook: writeMedia itself enforces the cap, so a caller that
+// just writes (no explicit enforceUserCap) still rolls the oldest off. Here
+// capturedAt ties on the shared clock, so the eviction falls back to file
+// mtime ordering — the regression that proves the mtime path works.
+test('writeMedia enforces the cap inline, falling back to mtime order on a clock tie', () => {
+    process.env.WHATSAPP_MEDIA_MAX_USER_BYTES = '12';
+    const first = mediaPaths(USER, 'm1')!;
+    writeMedia(USER, 'm1', bytes('12345'), { mime: 'image/png' });
+    // Make m1 unambiguously older by mtime AND drop its sidecar capturedAt so
+    // the age source falls back to mtime.
+    const sidecar = JSON.parse(readFileSync(first.metaPath, 'utf8'));
+    delete sidecar.capturedAt;
+    writeFileSync(first.metaPath, JSON.stringify(sidecar));
+    const past = (Date.now() - 60000) / 1000;
+    utimesSync(first.dataPath, past, past);
+
+    writeMedia(USER, 'm2', bytes('12345'), { mime: 'image/png' }); // 10 ≤ 12 → no eviction
+    writeMedia(USER, 'm3', bytes('12345'), { mime: 'image/png' }); // 15 > 12 → evict oldest (m1)
+
+    expect(mediaExists(USER, 'm1')).toBeNull();
+    expect(mediaExists(USER, 'm2')).not.toBeNull();
+    expect(mediaExists(USER, 'm3')).not.toBeNull();
+    expect(userDirBytes(USER)).toBe(10);
 });
 
 // ── sweepExpired ──
@@ -425,13 +568,24 @@ test('resolveMediaForMessage re-checks the real byte size after download', async
     expect(mediaExists(USER, MSG_ID)).toBeNull();
 });
 
-test('resolveMediaForMessage reports disk_full when the actual bytes blow the cap', async () => {
-    process.env.WHATSAPP_MEDIA_MAX_DISK_BYTES = '12';
-    writeMedia(USER, 'taken', bytes('12345678'), { mime: 'image/png' }); // 8 used
-    // Unknown declared size sails through the pre-check; the 10 real bytes don't fit.
+// The download always succeeds now; the per-user cap is honoured AFTER the
+// write by evicting the user's oldest, so the new media is always available.
+test('resolveMediaForMessage stores the new media and evicts the oldest under the cap', async () => {
+    process.env.WHATSAPP_MEDIA_MAX_USER_BYTES = '12';
+    // An older payload (backdated so it is unambiguously the oldest).
+    writeMedia(USER, 'oldest', bytes('12345678'), { mime: 'image/png' }); // 8 used
+    const oldPaths = mediaPaths(USER, 'oldest')!;
+    const sidecar = JSON.parse(readFileSync(oldPaths.metaPath, 'utf8'));
+    sidecar.capturedAt = 1; // ancient
+    writeFileSync(oldPaths.metaPath, JSON.stringify(sidecar));
+
+    // 10 real bytes arrive → 18 > 12 → the oldest (8) is rolled off, leaving 10.
     const msg = mediaMsg({}, { size: undefined });
     expect(await resolveMediaForMessage(USER, msg))
-        .toEqual({ mediaStatus: 'unavailable', mediaError: 'disk_full' });
+        .toEqual({ mediaStatus: 'available', mediaMime: 'image/jpeg', mediaFilename: 'beach.jpg', mediaSize: 10 });
+    expect(mediaExists(USER, MSG_ID)).not.toBeNull();   // new media kept
+    expect(mediaExists(USER, 'oldest')).toBeNull();     // oldest evicted
+    expect(mediaDiskBytes()).toBe(10);
 });
 
 test('resolveMediaForMessage maps undefined download results to expired', async () => {
@@ -471,6 +625,18 @@ test('resolveMediaForMessage falls back to the from-timestamp message id', async
     expect(verdict.mediaStatus).toBe('available');
     // Same fallback normalizeInbound uses → host can address the file.
     expect(mediaExists(USER, '919999000001@c.us-1717000000')).not.toBeNull();
+});
+
+// The fallback must mirror normalizeInbound's COUNTERPARTY keying: on fromMe
+// the `from` is the operator's own jid, shared by every chat — keying on it
+// stores the bytes under an id the wire never advertised (host GET 404s) and
+// collides two same-second sends to different customers on the same path.
+test('resolveMediaForMessage keys the fromMe fallback id on the counterparty', async () => {
+    const msg = mediaMsg({ id: undefined, fromMe: true, from: '919000000001@c.us', to: '919999000002@c.us' });
+    const verdict = await resolveMediaForMessage(USER, msg);
+    expect(verdict.mediaStatus).toBe('available');
+    expect(mediaExists(USER, '919999000002@c.us-1717000000')).not.toBeNull();   // keyed on `to`…
+    expect(mediaExists(USER, '919000000001@c.us-1717000000')).toBeNull();       // …never the operator
 });
 
 test('resolveMediaForMessage fills mime/filename gaps and omits a missing filename', async () => {

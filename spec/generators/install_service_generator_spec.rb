@@ -58,7 +58,7 @@ RSpec.describe "WhatsAppNotifier::Generators::InstallServiceGenerator" do
       generator.copy_service_files
 
       sources = generator.copied.map(&:first)
-      expect(sources).to match_array(%w[index.ts inbound.ts init_gate.ts media.ts metrics.ts sessions.ts package.json bun.lock])
+      expect(sources).to match_array(%w[index.ts history.ts inbound.ts init_gate.ts media.ts metrics.ts send.ts sessions.ts package.json bun.lock])
       expect(sources.grep(/test|node_modules|\.wwebjs|\.puppeteer/)).to be_empty
       expect(generator.copied.map(&:last)).to all(start_with("whatsapp_service/"))
     end

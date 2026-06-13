@@ -4,10 +4,14 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import {
     INBOUND_QUEUE_CAP,
+    SELF_SEND_MAX,
+    SELF_SEND_TTL_MS,
     configureInbound,
     loadTargets,
     rememberTarget,
     rememberLidAlias,
+    rememberSelfSend,
+    isSelfSend,
     resolveChat,
     backfillTargets,
     enqueueInbound,
@@ -35,6 +39,7 @@ afterAll(() => {
 });
 
 const CUST = '919999000001@c.us';
+const OPERATOR = '919000000001@c.us'; // the linked number's own jid (fromMe sender)
 
 function msg(overrides: any = {}) {
     return {
@@ -56,13 +61,26 @@ test('shouldCapture: any inbound 1:1 chat, no allowlist gate', () => {
 
     expect(shouldCapture('1', msg({ type: 'image' }))).toBe(true);        // media is real content
 
-    expect(shouldCapture('1', msg({ fromMe: true }))).toBe(false);       // own message
     expect(shouldCapture('1', msg({ from: '12@g.us' }))).toBe(false);     // group
     expect(shouldCapture('1', msg({ isStatus: true }))).toBe(false);      // status
     expect(shouldCapture('1', msg({ from: 'status@broadcast' }))).toBe(false);
     expect(shouldCapture('1', msg({ type: 'e2e_notification' }))).toBe(false); // system event
     expect(shouldCapture('1', msg({ type: 'call_log' }))).toBe(false);        // system event
     expect(shouldCapture('1', null)).toBe(false);                         // junk
+});
+
+// 0.8.0 two-way capture: operator-sent (fromMe) messages are kept, and every
+// jid gate moves to the COUNTERPARTY (msg.to) — the operator's own `from` is
+// always @c.us and must not vouch for a group/status post.
+test('shouldCapture: fromMe messages gate on the counterparty at msg.to', () => {
+    expect(shouldCapture('1', msg({ fromMe: true, from: OPERATOR, to: CUST }))).toBe(true);
+    expect(shouldCapture('1', msg({ fromMe: true, from: OPERATOR, to: '125417440686124@lid' }))).toBe(true);
+
+    expect(shouldCapture('1', msg({ fromMe: true, from: OPERATOR, to: '12@g.us' }))).toBe(false);          // own group post
+    expect(shouldCapture('1', msg({ fromMe: true, from: OPERATOR, to: 'status@broadcast' }))).toBe(false); // own status
+    expect(shouldCapture('1', msg({ fromMe: true, from: OPERATOR }))).toBe(false);                         // no counterparty
+    expect(shouldCapture('1', msg({ fromMe: true, from: OPERATOR, to: CUST, isStatus: true }))).toBe(false);
+    expect(shouldCapture('1', msg({ fromMe: true, from: OPERATOR, to: CUST, type: 'revoked' }))).toBe(false); // system event
 });
 
 // allowlist persists to disk + reloads
@@ -219,6 +237,24 @@ test('normalizeInbound maps fields and falls back on missing id', () => {
     expect(b.type).toBe('chat');
 });
 
+// fromMe normalization: the wire gains fromMe + to (counterparty), and the
+// fallback id keys on the counterparty — the operator's `from` is shared by
+// every chat, so id-less sends to two customers in the same second must not
+// collide in the host's messageId dedupe.
+test('normalizeInbound marks fromMe and carries the counterparty at to', () => {
+    const out = normalizeInbound(msg({ fromMe: true, from: OPERATOR, to: CUST, body: 'on my way' }));
+    expect(out).toEqual({
+        from: OPERATOR, to: CUST, fromMe: true,
+        body: 'on my way', messageId: 'true_919999000001@c.us_ABC',
+        timestamp: 1717000000, type: 'chat'
+    });
+});
+
+test('normalizeInbound falls back to a counterparty-keyed id for fromMe', () => {
+    const out = normalizeInbound({ fromMe: true, from: OPERATOR, to: CUST, timestamp: 42 });
+    expect(out.messageId).toBe(`${CUST}-42`);
+});
+
 // ── processInbound (capture pipeline ordering) ──
 
 const LID_FROM = '125417440686124@lid';
@@ -321,11 +357,182 @@ test('processInbound rejects filtered messages without resolving anything', asyn
     let resolveCalls = 0;
     const deps = { resolveMedia: async () => { resolveCalls += 1; return { mediaStatus: 'available' as const }; } };
 
-    await processInbound('pi5', mediaMsg({ fromMe: true }), deps);
+    await processInbound('pi5', mediaMsg({ fromMe: true }), deps); // fromMe without a counterparty
     await processInbound('pi5', mediaMsg({ from: '12@g.us' }), deps);
 
     expect(resolveCalls).toBe(0);
     expect(drainInbound('pi5')).toEqual([]);
+});
+
+// ── processInbound: operator-sent (fromMe) leg ──
+
+test('processInbound captures a fromMe message without a contact lookup', async () => {
+    let contactCalls = 0;
+    const m = msg({
+        fromMe: true, from: OPERATOR, to: CUST, body: 'on my way',
+        getContact: async () => { contactCalls += 1; return { pushname: 'The Operator' }; }
+    });
+
+    const pushed: InboundMsg[] = [];
+    await processInbound('fm1', m, {
+        resolveMedia: async () => ({ mediaStatus: 'available' as const }),
+        push: (_u, inbound) => pushed.push(inbound)
+    });
+
+    const drained = drainInbound('fm1');
+    expect(drained.length).toBe(1);
+    expect(drained[0].fromMe).toBe(true);
+    expect(drained[0].to).toBe(CUST);
+    expect(drained[0].body).toBe('on my way');
+    expect('senderName' in drained[0]).toBe(false); // the operator needs no display name…
+    expect(contactCalls).toBe(0);                   // …so the puppeteer roundtrip is skipped
+    expect(pushed).toEqual(drained);                // webhook saw the same payload
+});
+
+// A fromMe message to a brand-new number = operator opened the chat in the
+// WhatsApp app. It must join the backfill allowlist exactly like a /send
+// recipient, or the conversation would vanish from disconnect-window recovery.
+test('processInbound allowlists the fromMe counterparty for backfill', async () => {
+    const m = msg({ fromMe: true, from: OPERATOR, to: CUST });
+
+    await processInbound('fm2', m, { resolveMedia: async () => ({ mediaStatus: 'available' as const }) });
+
+    expect(loadTargets('fm2').has(CUST)).toBe(true);
+    expect(loadTargets('fm2').has(OPERATOR)).toBe(false); // counterparty, not self
+});
+
+test('processInbound resolves media for operator-sent media messages', async () => {
+    useMediaRoot('media-fromme');
+    const m = mediaMsg({ fromMe: true, from: OPERATOR, to: CUST });
+
+    await processInbound('fm3', m, { resolveMedia: resolveMediaForMessage });
+
+    const drained = drainInbound('fm3');
+    expect(drained.length).toBe(1);
+    expect(drained[0].fromMe).toBe(true);
+    expect(drained[0].mediaStatus).toBe('available');
+    expect(drained[0].mediaSize).toBe(10);
+});
+
+// An @lid counterparty on fromMe has no phone the host can thread on and no
+// contact handle to resolve it through (getContact resolves the sender — the
+// operator). Dropped with a log, before any download — same disk-hygiene rule
+// as the inbound @lid drop.
+test('processInbound drops a fromMe message to an @lid chat before any download', async () => {
+    let resolveCalls = 0;
+    const m = mediaMsg({ fromMe: true, from: OPERATOR, to: LID_FROM });
+
+    await processInbound('fm4', m, {
+        resolveMedia: async () => { resolveCalls += 1; return { mediaStatus: 'available' as const }; }
+    });
+
+    expect(resolveCalls).toBe(0);
+    expect(drainInbound('fm4')).toEqual([]);
+    expect(loadTargets('fm4').size).toBe(0); // an unmatchable chat earns no allowlist slot
+});
+
+// ── Self-send echo suppression ──
+//
+// Every /send fires its own fromMe message_create echo. A registry hit must
+// suppress the WHOLE pipeline: no media re-download (each platform media send
+// would otherwise re-fetch its own attachment and burn the shared disk cap on
+// bytes nobody fetches), no queue slot, no webhook — the host already got
+// this id from the /send response.
+
+test('processOwnMessage suppresses a registered self-send echo entirely', async () => {
+    const mediaRoot = useMediaRoot('media-self-send');
+    let resolveCalls = 0;
+    const m = mediaMsg({ fromMe: true, from: OPERATOR, to: CUST });
+    rememberSelfSend('ss1', m.id._serialized);
+
+    const pushed: InboundMsg[] = [];
+    await processInbound('ss1', m, {
+        resolveMedia: (u, message) => { resolveCalls += 1; return resolveMediaForMessage(u, message); },
+        push: (_u, inbound) => pushed.push(inbound)
+    });
+
+    expect(resolveCalls).toBe(0);               // no media re-download
+    expect(drainInbound('ss1')).toEqual([]);    // no queue slot
+    expect(pushed).toEqual([]);                 // no webhook
+    expect(existsSync(mediaRoot)).toBe(false);  // nothing hit the disk
+    expect(loadTargets('ss1').size).toBe(0);    // /send already allowlisted it
+});
+
+test('a fromMe message NOT in the registry flows through unchanged', async () => {
+    rememberSelfSend('ss2', 'some-other-send');
+    const m = msg({ fromMe: true, from: OPERATOR, to: CUST, body: 'typed on the phone' });
+
+    await processInbound('ss2', m, { resolveMedia: async () => ({ mediaStatus: 'available' as const }) });
+
+    const drained = drainInbound('ss2');
+    expect(drained.length).toBe(1);
+    expect(drained[0].fromMe).toBe(true);
+    expect(drained[0].body).toBe('typed on the phone');
+});
+
+test('self-send ids expire after the TTL and the registry stays bounded', () => {
+    const now = 1717000000000;
+    rememberSelfSend('ss3', 'echo-1', now);
+    expect(isSelfSend('ss3', 'echo-1', now + SELF_SEND_TTL_MS)).toBe(true);      // still inside
+    expect(isSelfSend('ss3', 'echo-1', now + SELF_SEND_TTL_MS + 1)).toBe(false); // expired
+    expect(isSelfSend('ss3', 'echo-1', now)).toBe(false);                        // …and forgotten
+
+    // Bound: the oldest id is evicted once the per-user cap overflows.
+    for (let i = 0; i < SELF_SEND_MAX + 1; i++) rememberSelfSend('ss3', `m${i}`, now);
+    expect(isSelfSend('ss3', 'm0', now)).toBe(false);                 // evicted oldest
+    expect(isSelfSend('ss3', 'm1', now)).toBe(true);
+    expect(isSelfSend('ss3', `m${SELF_SEND_MAX}`, now)).toBe(true);   // newest kept
+});
+
+test('isSelfSend scopes ids per user and misses an empty registry', () => {
+    rememberSelfSend('ss4', 'echo-1');
+    expect(isSelfSend('ss4', 'echo-1')).toBe(true);
+    expect(isSelfSend('other-user', 'echo-1')).toBe(false); // per-user scope
+    expect(isSelfSend('never-sent', 'anything')).toBe(false);
+});
+
+// Restart-equivalent: the registry is in-memory, so after a service restart
+// (empty registry) the echo falls back to flowing through — the host's
+// id-dedupe catches it, harmless.
+test('after a restart (empty registry) the echo flows through to the host', async () => {
+    rememberSelfSend('ss5', 'true_echo@c.us_X');
+    resetInboundState(); // the restart
+    configureInbound(dirFor);
+
+    const m = msg({ fromMe: true, from: OPERATOR, to: CUST, id: { _serialized: 'true_echo@c.us_X' } });
+    await processInbound('ss5', m, { resolveMedia: async () => ({ mediaStatus: 'available' as const }) });
+
+    expect(drainInbound('ss5').length).toBe(1);
+});
+
+test('clearInbound drops the self-send registry so suppression cannot leak across a re-pair', () => {
+    rememberSelfSend('ss6', 'echo-1');
+    clearInbound('ss6');
+    expect(isSelfSend('ss6', 'echo-1')).toBe(false);
+});
+
+// Reconnect recovery: fetchMessages returns BOTH directions, so with fromMe
+// accepted the backfill replays operator-app messages typed during a
+// disconnect window alongside the customer replies.
+test('backfillTargets replays both directions through the capture pipeline', async () => {
+    rememberTarget('bf3', CUST);
+    const client: ChatResolver = {
+        async getChatById(_chatId: string) {
+            return fakeChat([
+                msg({ body: 'customer-reply', getContact: async () => ({}) }),
+                msg({ fromMe: true, from: OPERATOR, to: CUST, body: 'operator-app', id: { _serialized: 'op1' } })
+            ]);
+        },
+        async getContactById(_chatId: string) { throw new Error('unused'); }
+    };
+
+    await backfillTargets('bf3', client, (userId, m) =>
+        processInbound(userId, m, { resolveMedia: async () => ({ mediaStatus: 'available' as const }) }));
+
+    const drained = drainInbound('bf3');
+    expect(drained.map((m) => m.body).sort()).toEqual(['customer-reply', 'operator-app']);
+    expect(drained.find((m) => m.body === 'operator-app')?.fromMe).toBe(true);
+    expect(drained.find((m) => m.body === 'customer-reply')?.fromMe).toBeUndefined();
 });
 
 // 0.6.0 wire back-compat: text payloads must keep the exact five-field shape —

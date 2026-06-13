@@ -16,11 +16,14 @@ import {
     InboundMsg,
     configureInbound,
     rememberTarget,
+    rememberSelfSend,
     backfillTargets,
+    resolveChat,
     drainInbound,
     clearInbound,
     processInbound
 } from './inbound';
+import { chatsResponse, historyResponse, refetchResponse, HistoryDeps, RefetchDeps } from './history';
 import {
     configureMedia,
     resolveMediaForMessage,
@@ -29,6 +32,7 @@ import {
     mediaGetResponse,
     mediaDeleteResponse
 } from './media';
+import { sentMessageId } from './send';
 
 const app = new Hono();
 const port = Number(process.env.PORT || 3001);
@@ -114,8 +118,10 @@ async function captureInbound(userId: string, msg: any) {
 async function backfillInbound(userId: string, client: Client) {
     // On reconnect, replay recent messages ONLY from chats we actually messaged
     // (the per-send allowlist) so a disconnect window doesn't drop a reply —
-    // without scraping every personal conversation on the linked number. Live
-    // replies are covered by the message_create handler; this is just recovery.
+    // without scraping every personal conversation on the linked number.
+    // fetchMessages returns BOTH directions, so operator-app (fromMe) messages
+    // typed during the window recover too. Live traffic is covered by the
+    // message_create handler; this is just recovery.
     await backfillTargets(userId, client, captureInbound);
 }
 
@@ -195,6 +201,8 @@ async function waitForClientReady(clientData: ClientData, timeoutMs = 30000): Pr
     throw new Error('Client not ready: WhatsApp Web store did not initialize in time');
 }
 
+// Resolves to the sent whatsapp-web.js Message so /send can hand the real
+// message id back to the host (the echo-dedupe key for two-way capture).
 async function sendMessageWithRetry(client: Client, clientData: ClientData, chatId: string, message: string, mediaUrl?: string | null) {
     const maxAttempts = 5;
 
@@ -206,12 +214,10 @@ async function sendMessageWithRetry(client: Client, clientData: ClientData, chat
             if (mediaUrl) {
                 const { MessageMedia } = require('whatsapp-web.js');
                 const media = await MessageMedia.fromUrl(mediaUrl);
-                await client.sendMessage(chatId, media, { caption: message });
-            } else {
-                await client.sendMessage(chatId, message);
+                return await client.sendMessage(chatId, media, { caption: message });
             }
 
-            return;
+            return await client.sendMessage(chatId, message);
         } catch (error) {
             console.error(`Send attempt ${attempt}/${maxAttempts} failed for chat ${chatId}:`, error);
 
@@ -302,10 +308,13 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
         backfillInbound(userId, client).catch((e) => console.error(`Backfill failed for ${userId}`, e));
     });
 
-    // Capture inbound replies. Only 'message_create' — it fires reliably for
-    // every message across linked/multi-device sessions (plain 'message'
-    // silently never fires on some). shouldCapture drops our own sends (fromMe)
-    // + groups/status; the queue dedupes on message_id on the Rails side.
+    // Capture BOTH directions of every 1:1 chat. Only 'message_create' — it
+    // fires reliably for every message across linked/multi-device sessions
+    // (plain 'message' silently never fires on some) and, unlike 'message',
+    // also fires for operator-sent (fromMe) messages, which the host threads
+    // as the other half of the conversation since 0.8.0. shouldCapture drops
+    // groups/status; the host dedupes on message_id — including the fromMe
+    // echo of its own /send calls.
     client.on('message_create', (msg) => captureInbound(userId, msg));
 
     client.on('authenticated', () => {
@@ -537,13 +546,21 @@ app.post('/send/:userId', async (c) => {
 
     try {
         const chatId = to.includes('@c.us') ? to : `${to}@c.us`;
-        await sendMessageWithRetry(data.client, data, chatId, message, mediaUrl);
+        const sent = await sendMessageWithRetry(data.client, data, chatId, message, mediaUrl);
 
         // Record the recipient so their replies survive a reconnect backfill.
         rememberTarget(userId, chatId);
 
         data.lastUsed = Date.now();
-        return c.json({ success: true });
+        // messageId is the echo-dedupe key: this send fires its own fromMe
+        // message_create, which the host must match by id (see send.ts).
+        const messageId = sentMessageId(sent);
+        // Register the id so the echo is suppressed service-side (no media
+        // re-download, no queue slot, no webhook — see inbound.ts). Best
+        // effort: an echo that already fired before sendMessage resolved
+        // flows through, and the host's id-dedupe catches it.
+        if (messageId) rememberSelfSend(userId, messageId);
+        return c.json({ success: true, messageId });
     } catch (error: any) {
         console.error(`Send error for user ${userId}:`, error);
         return c.json({ success: false, error: error.message }, 500);
@@ -573,6 +590,58 @@ app.get('/media/:userId/:messageId', (c) =>
 
 app.delete('/media/:userId/:messageId', (c) =>
     mediaDeleteResponse(c.req.param('userId'), c.req.param('messageId'), c.req.header('X-WA-Token'), WEBHOOK_TOKEN));
+
+// ── Chat history (history.ts) ──
+//
+// Shared deps for the two history routes: the SAME pairing fast-reject and
+// client accessor /send uses (never any other initialization path), plus
+// inbound.ts's chat resolver + reconnect allowlist.
+const historyDeps: HistoryDeps = {
+    hasPaired: (userId) => hasPairedSession(userId, clients, sessionDirForUser),
+    getClient: getOrCreateClient,
+    resolveChat,
+    rememberTarget
+};
+
+// GET /chats/:userId — list the paired number's 1:1 chats (discovery for the
+// host's old-conversation sync). Token-gated like /media; paired+ready gated
+// like /send; capped at the newest 500 (see history.ts).
+app.get('/chats/:userId', (c) =>
+    chatsResponse(c.req.param('userId'), c.req.header('X-WA-Token'), WEBHOOK_TOKEN, historyDeps));
+
+// POST /history/:userId { chatId, limit } — replay one chat's history through
+// the live-capture normalizer and return it DIRECTLY in the response (no
+// queue, no webhook — the host ingests synchronously). History media is
+// marked unavailable by design, never downloaded (see history.ts).
+app.post('/history/:userId', async (c) =>
+    historyResponse(
+        c.req.param('userId'),
+        await c.req.json().catch(() => ({})),
+        c.req.header('X-WA-Token'),
+        WEBHOOK_TOKEN,
+        historyDeps
+    ));
+
+// POST /media/:userId/refetch { messageId, chatId } — WhatsApp tap-to-download.
+// The host calls this when an operator opens an evicted/expired media bubble:
+// re-pull THAT message's bytes on demand, store them (cap re-enforced), and
+// report ready so the host can GET /media as usual. Token-gated + paired-ready
+// gated like /history; media no longer upstream → 404 'gone'. Reuses the live
+// resolveMediaForMessage pipeline (per-message size cap + 30s timeout).
+const refetchDeps: RefetchDeps = {
+    ...historyDeps,
+    getMessageById: (client, messageId) => client.getMessageById(messageId),
+    resolveMedia: (userId, msg) => resolveMediaForMessage(userId, msg)
+};
+
+app.post('/media/:userId/refetch', async (c) =>
+    refetchResponse(
+        c.req.param('userId'),
+        await c.req.json().catch(() => ({})),
+        c.req.header('X-WA-Token'),
+        WEBHOOK_TOKEN,
+        refetchDeps
+    ));
 
 
 console.log(`Starting Multi-User WhatsApp service (Bun Native) on port ${port}...`);

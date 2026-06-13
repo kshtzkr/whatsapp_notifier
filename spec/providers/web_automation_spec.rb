@@ -137,31 +137,36 @@ RSpec.describe WhatsAppNotifier::Providers::WebAutomation do
     end
   end
 
-  it "fetches and deletes media via the adapter when enabled" do
+  it "fetches, deletes and refetches media via the adapter when enabled" do
     Dir.mktmpdir do |dir|
       adapter = double(
         fetch_qr_code: "qr", connection_status: {},
         fetch_media: { body: "bytes", mime: "image/jpeg", filename: "a.jpg", size: 5 },
-        delete_media: { success: true }
+        delete_media: { success: true },
+        refetch_media: { mime: "image/jpeg", filename: "a.jpg", size: 5, status: "available" }
       )
       config = build_config(path: File.join(dir, "session.json"), adapter: adapter)
       provider = described_class.new(configuration: config)
 
       expect(provider.fetch_media(message_id: "m1", metadata: { user_id: 1 })).to include(mime: "image/jpeg")
       expect(provider.delete_media(message_id: "m1", metadata: { user_id: 1 })).to eq(success: true)
+      expect(provider.refetch_media(message_id: "m1", chat_id: "919@c.us", metadata: { user_id: 1 }))
+        .to include(status: "available")
       expect(adapter).to have_received(:fetch_media).with(message_id: "m1", metadata: { user_id: 1 })
       expect(adapter).to have_received(:delete_media).with(message_id: "m1", metadata: { user_id: 1 })
+      expect(adapter).to have_received(:refetch_media).with(message_id: "m1", chat_id: "919@c.us", metadata: { user_id: 1 })
     end
   end
 
   it "raises on the media helpers when the provider is disabled" do
     Dir.mktmpdir do |dir|
-      adapter = double(fetch_qr_code: "qr", connection_status: {}, fetch_media: nil, delete_media: { success: true })
+      adapter = double(fetch_qr_code: "qr", connection_status: {}, fetch_media: nil, delete_media: { success: true }, refetch_media: nil)
       config = build_config(path: File.join(dir, "session.json"), adapter: adapter, enabled: false)
       provider = described_class.new(configuration: config)
 
       expect { provider.fetch_media(message_id: "m1") }.to raise_error(WhatsAppNotifier::ConfigurationError, /disabled/)
       expect { provider.delete_media(message_id: "m1") }.to raise_error(WhatsAppNotifier::ConfigurationError, /disabled/)
+      expect { provider.refetch_media(message_id: "m1", chat_id: "919@c.us") }.to raise_error(WhatsAppNotifier::ConfigurationError, /disabled/)
     end
   end
 
@@ -173,6 +178,59 @@ RSpec.describe WhatsAppNotifier::Providers::WebAutomation do
 
       expect { provider.fetch_media(message_id: "m1") }.to raise_error(WhatsAppNotifier::ConfigurationError, /media fetch/)
       expect { provider.delete_media(message_id: "m1") }.to raise_error(WhatsAppNotifier::ConfigurationError, /media deletion/)
+      expect { provider.refetch_media(message_id: "m1", chat_id: "919@c.us") }.to raise_error(WhatsAppNotifier::ConfigurationError, /media refetch/)
+    end
+  end
+
+  it "lists chats and fetches history via the adapter when enabled" do
+    Dir.mktmpdir do |dir|
+      adapter = double(
+        fetch_qr_code: "qr", connection_status: {},
+        list_chats: [{ id: "919@c.us", name: "Asha", last_message_at: 9 }],
+        fetch_history: [{ from: "919@c.us", body: "old", message_id: "h1" }]
+      )
+      config = build_config(path: File.join(dir, "session.json"), adapter: adapter)
+      provider = described_class.new(configuration: config)
+
+      expect(provider.list_chats(metadata: { user_id: 1 })).to eq([{ id: "919@c.us", name: "Asha", last_message_at: 9 }])
+      expect(provider.fetch_history(chat_id: "919@c.us", limit: 20, metadata: { user_id: 1 }))
+        .to eq([{ from: "919@c.us", body: "old", message_id: "h1" }])
+      expect(adapter).to have_received(:list_chats).with(metadata: { user_id: 1 })
+      expect(adapter).to have_received(:fetch_history).with(chat_id: "919@c.us", limit: 20, metadata: { user_id: 1 })
+    end
+  end
+
+  it "defaults the history limit to 50 through the provider" do
+    Dir.mktmpdir do |dir|
+      adapter = double(fetch_qr_code: "qr", connection_status: {}, fetch_history: [])
+      config = build_config(path: File.join(dir, "session.json"), adapter: adapter)
+      provider = described_class.new(configuration: config)
+
+      provider.fetch_history(chat_id: "919@c.us")
+
+      expect(adapter).to have_received(:fetch_history).with(chat_id: "919@c.us", limit: 50, metadata: {})
+    end
+  end
+
+  it "raises on the history helpers when the provider is disabled" do
+    Dir.mktmpdir do |dir|
+      adapter = double(fetch_qr_code: "qr", connection_status: {}, list_chats: [], fetch_history: [])
+      config = build_config(path: File.join(dir, "session.json"), adapter: adapter, enabled: false)
+      provider = described_class.new(configuration: config)
+
+      expect { provider.list_chats }.to raise_error(WhatsAppNotifier::ConfigurationError, /disabled/)
+      expect { provider.fetch_history(chat_id: "919@c.us") }.to raise_error(WhatsAppNotifier::ConfigurationError, /disabled/)
+    end
+  end
+
+  it "raises on the history helpers when the adapter lacks history support" do
+    Dir.mktmpdir do |dir|
+      adapter = double(fetch_qr_code: "qr", connection_status: {})
+      config = build_config(path: File.join(dir, "session.json"), adapter: adapter)
+      provider = described_class.new(configuration: config)
+
+      expect { provider.list_chats }.to raise_error(WhatsAppNotifier::ConfigurationError, /chat listing/)
+      expect { provider.fetch_history(chat_id: "919@c.us") }.to raise_error(WhatsAppNotifier::ConfigurationError, /history replay/)
     end
   end
 

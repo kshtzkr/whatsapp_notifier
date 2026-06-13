@@ -1,5 +1,165 @@
 # Changelog
 
+## [0.8.0] - 2026-06-13
+
+Two-way capture: messages the operator sends from the WhatsApp app itself
+(phone/web) now reach the host, so threads show BOTH sides of every 1:1
+conversation — not just customer replies and platform sends.
+
+### Upgrade notes
+- **Deploy order: upgrade the HOST first, then the service.** A 0.8.0
+  service paired with a pre-0.8.0 host delivers fromMe payloads the host
+  doesn't key-gate on — an operator send in a self-test campaign comes back
+  through `/inbound` and is ingested as a phantom customer reply. A host that
+  understands `fromMe` is a no-op against a 0.7.0 service, so host → service
+  is the safe order.
+- **Hosts MUST still dedupe self-echoes on `messageId`** even though the
+  service now suppresses its own `/send` echoes (see Service below): the
+  suppression registry is in-memory and best-effort, so an echo landing after
+  a service restart — or firing before `/send` finished registering its id —
+  flows through. The contract is unchanged: store the `messageId` the 0.8.0
+  `/send` response returns against your outbound record (unique column), skip
+  any fromMe event whose id you already hold, and cover the race where the
+  echo beats your commit with an adopt window (match a recent same-body
+  outbound record with no id yet and adopt the id onto it instead of creating
+  a new message). Note the service's send retry can deliver a message more
+  than once upstream (pre-existing behaviour) — the adopt logic should
+  tolerate an echo that matches no pending record rather than erroring.
+- **Set `WHATSAPP_WEBHOOK_TOKEN` in production.** The new `GET /chats` and
+  `POST /history` routes enforce `X-WA-Token` ONLY when that env var is set
+  (same opt-in rule as `/media`) — and they expose whole-conversation
+  content, not just the caller's own queue. An untokened production service
+  serves every paired number's chat list and history to anyone who can reach
+  the port.
+- Capture now includes operator-sent 1:1 messages on the linked number —
+  by design (whole-conversation sync). Groups and status remain excluded by
+  the same counterparty jid gate; nothing changes for inbound payloads.
+
+### Service
+- `shouldCapture` keeps fromMe messages; every jid gate now validates the
+  COUNTERPARTY (`msg.to` for fromMe, `msg.from` otherwise) so the operator's
+  own @c.us jid can never vouch for a group/status post. isStatus and the
+  textual-type gates apply to both directions unchanged.
+- **Self-send echoes are suppressed service-side.** `POST /send` registers
+  the sent message id in a per-user, bounded (200 ids), 10-minute-TTL
+  in-memory registry; the fromMe capture leg drops registry hits ENTIRELY —
+  no media resolution (a media send no longer re-downloads its own
+  attachment on the sending Chromium and churns the per-user media cap with
+  bytes the host never fetches), no queue slot, no webhook push. Messages
+  typed on the phone and reconnect-backfill replays are never in the
+  registry and flow through unchanged; hosts keep the id-dedupe for the
+  restart gap (see upgrade notes). Logout clears the registry with the rest
+  of the pairing state.
+- fromMe payloads carry optional `fromMe: true` + `to` (the counterparty chat
+  id the host threads on). Keys appear ONLY on operator-sent messages, so
+  inbound payloads stay byte-identical to 0.7.0 and hosts key-gate on
+  `fromMe` presence. The fallback `messageId` for id-less fromMe messages
+  keys on the counterparty (`${to}-${timestamp}`) — the operator's `from` is
+  shared by every chat and would collide across same-second sends. The media
+  store files id-less fromMe media under the same counterparty key, so the
+  bytes stay addressable by the exact id the wire advertised.
+- The fromMe leg skips the `senderName` contact lookup (the sender is the
+  operator; saves a puppeteer roundtrip per message). Media resolution,
+  enqueue and webhook push are shared with the inbound leg — operator-sent
+  photos/documents sync through the existing `GET /media` path under the same
+  size caps and TTL.
+- A fromMe message to a brand-new number allowlists the chat for reconnect
+  backfill exactly like a `/send` recipient, so operator-initiated
+  conversations survive disconnect windows too. The backfill itself replays
+  BOTH directions (`fetchMessages` always returned own messages; the old
+  fromMe guard just dropped them).
+- fromMe messages to `@lid` privacy chats are dropped with a log: an @lid
+  counterparty carries no phone the host can match, and unlike inbound there
+  is no contact handle to resolve it through (`getContact()` resolves the
+  sender — the operator).
+- `POST /send` now returns `{ success: true, messageId }` with the real
+  serialized WhatsApp id of the sent message (the echo-dedupe key above), or
+  `messageId: null` when the library hands nothing back — never a fabricated
+  id, which would match no echo while still occupying the host's unique slot.
+
+### Adapter & Ruby API
+- `fetch_inbound` maps the new optional keys as `from_me` / `to` — only when
+  present on the wire, mirroring the media-key contract, so hosts stay no-op
+  against a pre-0.8.0 service mid-rollout.
+- `send_message` prefers the service-issued `messageId` (or `message_id`)
+  from the `/send` response as the result's `message_id`, falling back to the
+  existing `idempotency_key` / `local-<ts>` fabrication against 0.7.0
+  services. `Result#message_id` therefore carries the real WhatsApp id once
+  the 0.8.0 service is deployed.
+- The ejected service (install generator) now ships `send.ts`.
+
+### Chat history
+Sync OLD conversations — chats that predate the pairing — on demand.
+
+- `GET /chats/:userId` lists the paired number's 1:1 chats for discovery:
+  `{ success: true, chats: [{ id, name, lastMessageAt }] }`, newest first,
+  **capped at the 500 most recent** (a long-lived personal number can hold
+  thousands of chats; the host only needs the recent ones to offer for
+  syncing). `@c.us` ids only — groups, status and `@lid` privacy chats are
+  excluded. `name` is best-effort (null when WhatsApp has none);
+  `lastMessageAt` is epoch seconds or null.
+- `POST /history/:userId` with `{ chatId, limit }` replays one chat's recent
+  messages through the live-capture normalizer and returns them DIRECTLY —
+  `{ success: true, messages: [...] }`, oldest first; no queue, no webhook
+  (the host ingests the response synchronously). Both directions are
+  replayed: operator-sent messages carry `fromMe` + `to` exactly like live
+  capture. `chatId` accepts a bare number (normalized to `@c.us` like
+  `/send`) and must be a 1:1 id; `limit` is clamped to 1..200 (default 50).
+  Messages failing the live `shouldCapture` gate (system events, status) are
+  skipped, and the synced chat joins the reconnect-backfill allowlist like a
+  `/send` recipient.
+- **History media is marked, never downloaded — by design.** Media-typed
+  messages return `hasMedia: true, mediaStatus: 'unavailable', mediaError:
+  'history'`: bulk-downloading a photo-heavy chat's history would blow the
+  media disk caps and stall the session behind sequential downloads. Live
+  capture keeps downloading media for everything that arrives after the sync.
+- Both routes gate exactly like `POST /send` (paired fast-reject before any
+  client exists, then AUTHENTICATED + ready) and additionally enforce
+  `X-WA-Token` like `/media` when `WHATSAPP_WEBHOOK_TOKEN` is set — they
+  expose whole conversations, not just the caller's own queue.
+- Ruby API: `WhatsAppNotifier.list_chats(metadata:)` returns
+  `[{ id:, name:, last_message_at: }]`;
+  `WhatsAppNotifier.fetch_history(chat_id:, limit: 50, metadata:)` returns
+  messages mapped exactly like `fetch_inbound` (including `from_me` / `to`
+  and the media keys). Both raise on any non-2xx — 401 (never paired / not
+  ready) included. The adapter mirrors the service's limit clamp so a wild
+  host value can't balloon a request.
+- The ejected service now ships `history.ts`.
+
+### Media cap & on-demand re-download
+WhatsApp's tap-to-download model: keep RECENT media per user, roll the rest
+off, and re-pull any one item on demand when an operator opens its bubble.
+
+- **Per-user 1GB rolling cap with LRU eviction** (`WHATSAPP_MEDIA_MAX_USER_BYTES`,
+  default 1GB, NaN-safe). The cap is enforced AFTER each successful write:
+  `enforceUserCap` deletes the user's OLDEST media (by `capturedAt`/mtime,
+  same ordering as the TTL sweep) until they fit again. Because we
+  download-then-evict, a user is **never skipped on disk grounds** — the old
+  global `disk_full` skip (which starved real customer inbound media once the
+  shared cap filled) is gone. `downloadPolicy` no longer returns `disk_full`;
+  the per-MESSAGE size gate (16MB inline / `WHATSAPP_MEDIA_MAX_BYTES` for
+  documents) stays, and `WHATSAPP_MEDIA_MAX_DISK_BYTES` remains only an
+  absolute global backstop. Each user's cap is independent; eviction touches
+  only that user's directory.
+- **`POST /media/:userId/refetch`** `{ messageId, chatId }` re-downloads ONE
+  message's media on demand. Token-gated and paired/ready-gated exactly like
+  `/history`; `chatId` is normalized + `@c.us`-validated and `messageId`
+  sanitized. The service resolves the message (`getMessageById`, falling back
+  to a chat-history scan), runs it through the live download pipeline
+  (per-message size cap + 30s timeout + cap-enforced store), and answers
+  `{ success: true, messageId, mediaStatus: 'available', mediaMime,
+  mediaFilename, mediaSize }`. After that the host fetches the bytes with the
+  usual `GET /media`. Media gone upstream (deleted, too old) → `404
+  { success: false, mediaStatus: 'unavailable', mediaError: 'gone' }`.
+- Hosts can now **lazily re-download evicted or TTL-expired media**: when a
+  `GET /media` 404s for a bubble the operator opened, call `refetch_media`
+  first, then re-`GET`. Old media no longer needs to live on disk forever.
+- Ruby API: `WhatsAppNotifier.refetch_media(message_id:, chat_id:, metadata:)`
+  → `{ mime:, filename:, size:, status: }` on success, or `nil` when the media
+  is gone upstream (404) — same nil-on-404 contract as `fetch_media`, so a host
+  that gets `nil` can grey the bubble out. `respond_to?`-guarded through the
+  provider/client/module chain like the other media helpers.
+
 ## [0.7.0] - 2026-06-11
 
 Inbound media: the service now downloads customer images, voice notes and
