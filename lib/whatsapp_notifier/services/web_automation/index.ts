@@ -16,6 +16,7 @@ import {
     InboundMsg,
     configureInbound,
     rememberTarget,
+    rememberSelfSend,
     backfillTargets,
     resolveChat,
     drainInbound,
@@ -553,7 +554,13 @@ app.post('/send/:userId', async (c) => {
         data.lastUsed = Date.now();
         // messageId is the echo-dedupe key: this send fires its own fromMe
         // message_create, which the host must match by id (see send.ts).
-        return c.json({ success: true, messageId: sentMessageId(sent) });
+        const messageId = sentMessageId(sent);
+        // Register the id so the echo is suppressed service-side (no media
+        // re-download, no queue slot, no webhook — see inbound.ts). Best
+        // effort: an echo that already fired before sendMessage resolved
+        // flows through, and the host's id-dedupe catches it.
+        if (messageId) rememberSelfSend(userId, messageId);
+        return c.json({ success: true, messageId });
     } catch (error: any) {
         console.error(`Send error for user ${userId}:`, error);
         return c.json({ success: false, error: error.message }, 500);

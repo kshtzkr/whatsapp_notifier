@@ -121,6 +121,53 @@ export function drainInbound(userId: string): InboundMsg[] {
     return q;
 }
 
+// ── Self-send echo registry ──
+//
+// Every POST /send fires its own fromMe message_create echo. Letting that
+// echo run the capture pipeline is pure waste: a media send re-downloads the
+// attachment it just uploaded (up to the 30s download budget on the sending
+// Chromium) and stores bytes nobody will ever fetch against the shared disk
+// cap — at campaign scale those phantom copies starve REAL customer inbound
+// media (downloadPolicy starts answering disk_full). The echo's payload is
+// redundant too: the /send response already handed the host this exact
+// messageId, and the host's id-dedupe would discard the echo anyway — so a
+// registry hit is suppressed ENTIRELY (no media resolution, no enqueue, no
+// webhook), which also closes the host-side echo-beats-response adopt race
+// for same-process sends. Messages NOT in the registry (typed on the phone,
+// or replayed by the reconnect backfill) flow through unchanged.
+//
+// Best-effort by design: the registry is in-memory, so an echo landing after
+// a service restart (or one that fires before /send finishes registering the
+// id) flows through — the host's id-dedupe catches it, harmless. Bounded per
+// user and TTL'd because echoes land within seconds of the send; the limits
+// only have to outlive the echo lag, not the conversation.
+export const SELF_SEND_MAX = 200;
+export const SELF_SEND_TTL_MS = 10 * 60 * 1000;
+
+// userId → (messageId → expiry epoch ms). Maps iterate in insertion order,
+// so the first key is always the oldest send — eviction is O(evicted).
+const selfSendIds = new Map<string, Map<string, number>>();
+
+export function rememberSelfSend(userId: string, messageId: string, nowMs = Date.now()) {
+    let ids = selfSendIds.get(userId);
+    if (!ids) { ids = new Map(); selfSendIds.set(userId, ids); }
+    ids.set(messageId, nowMs + SELF_SEND_TTL_MS);
+    while (ids.size > SELF_SEND_MAX) {
+        ids.delete(ids.keys().next().value as string);
+    }
+}
+
+export function isSelfSend(userId: string, messageId: string, nowMs = Date.now()): boolean {
+    const ids = selfSendIds.get(userId);
+    const expiry = ids && ids.get(messageId);
+    if (expiry === undefined) return false;
+    if (nowMs > expiry) {
+        ids!.delete(messageId); // expired — forget it so the map stays lean
+        return false;
+    }
+    return true;
+}
+
 // Sanity filter for a real 1:1 message in either direction. Accepts both
 // phone-number chats (@c.us) and privacy-id chats (@lid — newer WhatsApp
 // delivers replies from an @lid). The jid gate always validates the
@@ -247,6 +294,12 @@ export async function processInbound(userId: string, msg: any, deps: CaptureDeps
 // resolution, enqueue and webhook are the SAME as inbound — operator photos/
 // documents sync through the existing GET /media path under the same caps.
 async function processOwnMessage(userId: string, msg: any, deps: CaptureDeps) {
+    // The echo of our own /send: suppress entirely — no media resolution, no
+    // enqueue, no webhook (see the self-send registry above for why).
+    // rememberTarget is skipped too: /send already allowlisted this recipient.
+    const messageId = msg.id && msg.id._serialized;
+    if (messageId && isSelfSend(userId, messageId)) return;
+
     const to: string = msg.to || '';
     // An @lid counterparty carries no phone number the host can thread on,
     // and unlike inbound there is no contact handle to resolve it through
@@ -332,10 +385,14 @@ export async function backfillTargets(
 export function clearInbound(userId: string) {
     inboundQueues.delete(userId);
     outboundTargets.delete(userId);
+    // Self-send echo ids belong to the old pairing too — and suppression must
+    // never leak across a re-pair (however unlikely an id collision is).
+    selfSendIds.delete(userId);
 }
 
 // Test helper: wipe in-memory state between examples.
 export function resetInboundState() {
     inboundQueues.clear();
     outboundTargets.clear();
+    selfSendIds.clear();
 }

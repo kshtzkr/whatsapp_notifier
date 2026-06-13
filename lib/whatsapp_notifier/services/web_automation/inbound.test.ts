@@ -4,10 +4,14 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import {
     INBOUND_QUEUE_CAP,
+    SELF_SEND_MAX,
+    SELF_SEND_TTL_MS,
     configureInbound,
     loadTargets,
     rememberTarget,
     rememberLidAlias,
+    rememberSelfSend,
+    isSelfSend,
     resolveChat,
     backfillTargets,
     enqueueInbound,
@@ -425,6 +429,86 @@ test('processInbound drops a fromMe message to an @lid chat before any download'
     expect(resolveCalls).toBe(0);
     expect(drainInbound('fm4')).toEqual([]);
     expect(loadTargets('fm4').size).toBe(0); // an unmatchable chat earns no allowlist slot
+});
+
+// ── Self-send echo suppression ──
+//
+// Every /send fires its own fromMe message_create echo. A registry hit must
+// suppress the WHOLE pipeline: no media re-download (each platform media send
+// would otherwise re-fetch its own attachment and burn the shared disk cap on
+// bytes nobody fetches), no queue slot, no webhook — the host already got
+// this id from the /send response.
+
+test('processOwnMessage suppresses a registered self-send echo entirely', async () => {
+    const mediaRoot = useMediaRoot('media-self-send');
+    let resolveCalls = 0;
+    const m = mediaMsg({ fromMe: true, from: OPERATOR, to: CUST });
+    rememberSelfSend('ss1', m.id._serialized);
+
+    const pushed: InboundMsg[] = [];
+    await processInbound('ss1', m, {
+        resolveMedia: (u, message) => { resolveCalls += 1; return resolveMediaForMessage(u, message); },
+        push: (_u, inbound) => pushed.push(inbound)
+    });
+
+    expect(resolveCalls).toBe(0);               // no media re-download
+    expect(drainInbound('ss1')).toEqual([]);    // no queue slot
+    expect(pushed).toEqual([]);                 // no webhook
+    expect(existsSync(mediaRoot)).toBe(false);  // nothing hit the disk
+    expect(loadTargets('ss1').size).toBe(0);    // /send already allowlisted it
+});
+
+test('a fromMe message NOT in the registry flows through unchanged', async () => {
+    rememberSelfSend('ss2', 'some-other-send');
+    const m = msg({ fromMe: true, from: OPERATOR, to: CUST, body: 'typed on the phone' });
+
+    await processInbound('ss2', m, { resolveMedia: async () => ({ mediaStatus: 'available' as const }) });
+
+    const drained = drainInbound('ss2');
+    expect(drained.length).toBe(1);
+    expect(drained[0].fromMe).toBe(true);
+    expect(drained[0].body).toBe('typed on the phone');
+});
+
+test('self-send ids expire after the TTL and the registry stays bounded', () => {
+    const now = 1717000000000;
+    rememberSelfSend('ss3', 'echo-1', now);
+    expect(isSelfSend('ss3', 'echo-1', now + SELF_SEND_TTL_MS)).toBe(true);      // still inside
+    expect(isSelfSend('ss3', 'echo-1', now + SELF_SEND_TTL_MS + 1)).toBe(false); // expired
+    expect(isSelfSend('ss3', 'echo-1', now)).toBe(false);                        // …and forgotten
+
+    // Bound: the oldest id is evicted once the per-user cap overflows.
+    for (let i = 0; i < SELF_SEND_MAX + 1; i++) rememberSelfSend('ss3', `m${i}`, now);
+    expect(isSelfSend('ss3', 'm0', now)).toBe(false);                 // evicted oldest
+    expect(isSelfSend('ss3', 'm1', now)).toBe(true);
+    expect(isSelfSend('ss3', `m${SELF_SEND_MAX}`, now)).toBe(true);   // newest kept
+});
+
+test('isSelfSend scopes ids per user and misses an empty registry', () => {
+    rememberSelfSend('ss4', 'echo-1');
+    expect(isSelfSend('ss4', 'echo-1')).toBe(true);
+    expect(isSelfSend('other-user', 'echo-1')).toBe(false); // per-user scope
+    expect(isSelfSend('never-sent', 'anything')).toBe(false);
+});
+
+// Restart-equivalent: the registry is in-memory, so after a service restart
+// (empty registry) the echo falls back to flowing through — the host's
+// id-dedupe catches it, harmless.
+test('after a restart (empty registry) the echo flows through to the host', async () => {
+    rememberSelfSend('ss5', 'true_echo@c.us_X');
+    resetInboundState(); // the restart
+    configureInbound(dirFor);
+
+    const m = msg({ fromMe: true, from: OPERATOR, to: CUST, id: { _serialized: 'true_echo@c.us_X' } });
+    await processInbound('ss5', m, { resolveMedia: async () => ({ mediaStatus: 'available' as const }) });
+
+    expect(drainInbound('ss5').length).toBe(1);
+});
+
+test('clearInbound drops the self-send registry so suppression cannot leak across a re-pair', () => {
+    rememberSelfSend('ss6', 'echo-1');
+    clearInbound('ss6');
+    expect(isSelfSend('ss6', 'echo-1')).toBe(false);
 });
 
 // Reconnect recovery: fetchMessages returns BOTH directions, so with fromMe
