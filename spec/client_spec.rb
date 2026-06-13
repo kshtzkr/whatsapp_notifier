@@ -77,7 +77,8 @@ RSpec.describe WhatsAppNotifier::Client do
         fetch_qr_code: "qr",
         connection_status: { state: "AUTHENTICATED", authenticated: true },
         fetch_media: { body: "bytes", mime: "image/jpeg", filename: nil, size: 5 },
-        delete_media: { success: true }
+        delete_media: { success: true },
+        refetch_media: { mime: "image/jpeg", filename: nil, size: 5, status: "available" }
       )
       client = described_class.new(configuration: config)
 
@@ -85,6 +86,8 @@ RSpec.describe WhatsAppNotifier::Client do
         .to include(body: "bytes", size: 5)
       expect(client.delete_media(message_id: "m1", provider: :web_automation, metadata: { user_id: 1 }))
         .to eq(success: true)
+      expect(client.refetch_media(message_id: "m1", chat_id: "919@c.us", provider: :web_automation, metadata: { user_id: 1 }))
+        .to include(status: "available")
     end
   end
 

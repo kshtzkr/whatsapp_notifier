@@ -120,6 +120,29 @@ module WhatsAppNotifier
       }
     end
 
+    # On-demand re-download (WhatsApp tap-to-download). The host calls this when
+    # an operator opens a media bubble whose bytes the service no longer holds
+    # (rolled off by the per-user cap or expired by TTL): the service re-pulls
+    # THAT one message's media and stores it, after which the host fetches it
+    # with the usual fetch_media GET. Returns { mime:, filename:, size:, status: }
+    # on success, or nil when the media is gone upstream (404) — same nil-on-404
+    # contract as fetch_media, so a host that gets nil can grey the bubble out.
+    # A 0.7.0 service mid-rollout has no /refetch route and also answers 404 →
+    # nil, indistinguishable from gone, which is the safe degrade.
+    def refetch_media(message_id:, chat_id:, metadata: {})
+      user_id = user_id_from(metadata)
+      body = { messageId: message_id, chatId: chat_id }
+      response = request(:post, "/media/#{user_id}/refetch", body: body, allow_404: true)
+      return nil unless response["success"]
+
+      {
+        mime: response["mediaMime"] || response["media_mime"],
+        filename: response["mediaFilename"] || response["media_filename"],
+        size: response["mediaSize"] || response["media_size"],
+        status: response["mediaStatus"] || response["media_status"]
+      }
+    end
+
     # Removes the service's copy after the host has attached the bytes.
     # Idempotent on the service side: deleting absent media still succeeds.
     # A 0.6.0 service mid-rollout has no /media routes and answers 404 —

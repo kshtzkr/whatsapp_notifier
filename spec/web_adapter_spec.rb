@@ -319,6 +319,60 @@ RSpec.describe WhatsAppNotifier::WebAdapter do
       .to raise_error(/service request failed \(500\)/)
   end
 
+  it "refetches media via POST, mapping the success verdict and attaching the token" do
+    allow(ENV).to receive(:[]).and_call_original
+    allow(ENV).to receive(:[]).with("WHATSAPP_WEBHOOK_TOKEN").and_return("sekrit")
+    response = http_success(body: {
+      "success" => true, "messageId" => "true_919@c.us_ABC", "mediaStatus" => "available",
+      "mediaMime" => "image/jpeg", "mediaFilename" => "beach.jpg", "mediaSize" => 10
+    })
+    captured = nil
+    http = double("http")
+    allow(http).to receive(:request) { |req| captured = req; response }
+    allow(Net::HTTP).to receive(:start) { |*_args, **_kwargs, &blk| blk.call(http) }
+
+    result = adapter.refetch_media(message_id: "true_919@c.us_ABC", chat_id: "919@c.us", metadata: { user_id: "u-1" })
+
+    expect(result).to eq(mime: "image/jpeg", filename: "beach.jpg", size: 10, status: "available")
+    expect(captured).to be_a(Net::HTTP::Post)
+    expect(captured.path).to eq("/media/u-1/refetch")
+    expect(captured["X-WA-Token"]).to eq("sekrit")
+    expect(JSON.parse(captured.body)).to eq("messageId" => "true_919@c.us_ABC", "chatId" => "919@c.us")
+  end
+
+  it "accepts the snake_case media keys in the refetch response" do
+    body = { "success" => true, "media_status" => "available", "media_mime" => "audio/ogg",
+             "media_filename" => "vn.ogg", "media_size" => 3 }
+    allow(Net::HTTP).to receive(:start).and_return(http_success(body: body))
+
+    expect(adapter.refetch_media(message_id: "m1", chat_id: "919@c.us", metadata: {}))
+      .to eq(mime: "audio/ogg", filename: "vn.ogg", size: 3, status: "available")
+  end
+
+  # Media gone upstream → the service answers 404 success:false; refetch
+  # degrades to nil like fetch_media, so the host can grey the bubble out.
+  it "returns nil when the refetch reports the media is gone (404)" do
+    allow(Net::HTTP).to receive(:start)
+      .and_return(http_failure(code: "404", body: JSON.generate({ success: false, mediaStatus: "unavailable", mediaError: "gone" })))
+
+    expect(adapter.refetch_media(message_id: "m1", chat_id: "919@c.us", metadata: {})).to be_nil
+  end
+
+  # A success:false body that somehow arrives with a 2xx still degrades to nil.
+  it "returns nil when the refetch response is unsuccessful" do
+    allow(Net::HTTP).to receive(:start).and_return(http_success(body: { "success" => false, "mediaError" => "gone" }))
+
+    expect(adapter.refetch_media(message_id: "m1", chat_id: "919@c.us", metadata: {})).to be_nil
+  end
+
+  it "still raises when the refetch fails with a non-404 code" do
+    allow(Net::HTTP).to receive(:start)
+      .and_return(http_failure(code: "401", body: JSON.generate({ error: "User not authenticated" })))
+
+    expect { adapter.refetch_media(message_id: "m1", chat_id: "919@c.us", metadata: {}) }
+      .to raise_error(/service request failed \(401\)/)
+  end
+
   it "lists chats with the token attached and maps the discovery keys" do
     allow(ENV).to receive(:[]).and_call_original
     allow(ENV).to receive(:[]).with("WHATSAPP_WEBHOOK_TOKEN").and_return("sekrit")

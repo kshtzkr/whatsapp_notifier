@@ -23,7 +23,7 @@ import {
     clearInbound,
     processInbound
 } from './inbound';
-import { chatsResponse, historyResponse, HistoryDeps } from './history';
+import { chatsResponse, historyResponse, refetchResponse, HistoryDeps, RefetchDeps } from './history';
 import {
     configureMedia,
     resolveMediaForMessage,
@@ -620,6 +620,27 @@ app.post('/history/:userId', async (c) =>
         c.req.header('X-WA-Token'),
         WEBHOOK_TOKEN,
         historyDeps
+    ));
+
+// POST /media/:userId/refetch { messageId, chatId } — WhatsApp tap-to-download.
+// The host calls this when an operator opens an evicted/expired media bubble:
+// re-pull THAT message's bytes on demand, store them (cap re-enforced), and
+// report ready so the host can GET /media as usual. Token-gated + paired-ready
+// gated like /history; media no longer upstream → 404 'gone'. Reuses the live
+// resolveMediaForMessage pipeline (per-message size cap + 30s timeout).
+const refetchDeps: RefetchDeps = {
+    ...historyDeps,
+    getMessageById: (client, messageId) => client.getMessageById(messageId),
+    resolveMedia: (userId, msg) => resolveMediaForMessage(userId, msg)
+};
+
+app.post('/media/:userId/refetch', async (c) =>
+    refetchResponse(
+        c.req.param('userId'),
+        await c.req.json().catch(() => ({})),
+        c.req.header('X-WA-Token'),
+        WEBHOOK_TOKEN,
+        refetchDeps
     ));
 
 

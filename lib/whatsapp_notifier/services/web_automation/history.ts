@@ -15,7 +15,7 @@ import {
     shouldCapture,
     normalizeInbound
 } from './inbound';
-import { verifyMediaToken } from './media';
+import { verifyMediaToken, MediaResolution, sanitizeId } from './media';
 
 // ── Chat list (GET /chats) ──
 
@@ -205,6 +205,119 @@ export async function historyResponse(
         return Response.json({ success: true, messages });
     } catch (error: any) {
         console.error(`History replay error for user ${userId}:`, error);
+        return deny(500, (error && error.message) || String(error));
+    }
+}
+
+// ── On-demand media re-download (POST /media/:userId/refetch) ──
+//
+// WhatsApp's tap-to-download model. Eager capture only keeps RECENT media
+// (the per-user rolling cap rolls old media off; the TTL sweep expires media
+// past 48h) so an operator opening an old or evicted media bubble finds the
+// service has no copy (GET /media 404s). This endpoint re-pulls THAT one
+// message's bytes on demand: resolve the message upstream, download it
+// (respecting the SAME per-message size cap + 30s timeout as live capture),
+// store it (the write re-enforces the per-user cap), and report it ready so
+// the host can GET /media as usual. A message whose media is gone upstream
+// (deleted, too old) answers a 404 'gone' so the host can grey the bubble out.
+
+export interface RefetchDeps extends SessionGateDeps {
+    // getMessageById is the fast path; resolveChat + a fetchMessages scan is
+    // the fallback for ids getMessageById can't hydrate directly.
+    getMessageById: (client: any, messageId: string) => Promise<any | null>;
+    resolveChat: (client: any, chatId: string) => Promise<ChatLike | null>;
+    // Injected media.ts pipeline (download → cap-enforced store → verdict),
+    // seamed so the route can be tested without a real downloadMedia.
+    resolveMedia: (userId: string, msg: any) => Promise<MediaResolution>;
+}
+
+// Find the live whatsapp-web.js Message for an id: getMessageById first, then
+// scan the chat's recent messages for a matching serialized id. Returns null
+// when neither path turns it up (message rolled out of the chat window, or the
+// id is unknown) — the route maps that to 'gone'.
+export async function findMessage(
+    deps: RefetchDeps,
+    client: any,
+    messageId: string,
+    chatId: string
+): Promise<any | null> {
+    try {
+        const direct = await deps.getMessageById(client, messageId);
+        if (direct) return direct;
+    } catch (_) { /* fall through to the chat scan */ }
+
+    try {
+        const chat = await deps.resolveChat(client, chatId);
+        if (!chat) return null;
+        const msgs = await chat.fetchMessages({ limit: MAX_HISTORY_LIMIT });
+        return (Array.isArray(msgs) ? msgs : [])
+            .find((m) => m && m.id && m.id._serialized === messageId) || null;
+    } catch (_) {
+        return null;
+    }
+}
+
+// Re-download the bytes for one message. Same token gate, paired+ready gate
+// and @c.us-validated chatId as /history; the messageId must sanitize to the
+// store charset (the path the host will GET it back on). On success answers
+// { success: true, mediaStatus: 'available', media* }; when the media no
+// longer exists upstream answers 404 { success: false, mediaStatus:
+// 'unavailable', mediaError: 'gone' }.
+export async function refetchResponse(
+    userId: string,
+    body: any,
+    token: string | undefined,
+    expectedToken: string | undefined,
+    deps: RefetchDeps
+): Promise<Response> {
+    if (!verifyMediaToken(token, expectedToken)) return deny(401, 'unauthorized');
+    // Validate the body before the pairing gate (mirrors /history): a malformed
+    // request earns its 422 without touching any client.
+    const messageId = sanitizeId(body && body.messageId);
+    if (!messageId) {
+        return deny(422, '`messageId` is required');
+    }
+    const chatId = normalizeHistoryChatId(body && body.chatId);
+    if (!chatId) {
+        return deny(422, '`chatId` is required and must be a 1:1 @c.us chat id');
+    }
+    const gate = await gatePairedReady(userId, deps);
+    if (gate instanceof Response) return gate;
+
+    try {
+        const msg = await findMessage(deps, gate.client, messageId, chatId);
+        gate.lastUsed = Date.now();
+        // Message not found upstream, or found but carries no media → nothing
+        // to re-download. Same 'gone' verdict either way: the bytes are gone.
+        if (!msg || !msg.hasMedia) {
+            return Response.json(
+                { success: false, mediaStatus: 'unavailable', mediaError: 'gone' },
+                { status: 404 }
+            );
+        }
+
+        // resolveMediaForMessage downloads (per-message cap + 30s timeout) and
+        // stores under the SAME id the host GETs, re-enforcing the per-user cap.
+        const verdict = await deps.resolveMedia(userId, msg);
+        if (verdict.mediaStatus !== 'available') {
+            // expired (gone upstream), too_large, download_failed, … → the host
+            // can't show bytes. 404 with the typed reason so it greys the bubble.
+            return Response.json(
+                { success: false, mediaStatus: 'unavailable', mediaError: verdict.mediaError || 'gone' },
+                { status: 404 }
+            );
+        }
+
+        return Response.json({
+            success: true,
+            messageId,
+            mediaStatus: 'available',
+            mediaMime: verdict.mediaMime,
+            ...(verdict.mediaFilename ? { mediaFilename: verdict.mediaFilename } : {}),
+            mediaSize: verdict.mediaSize
+        });
+    } catch (error: any) {
+        console.error(`Media refetch error for user ${userId}:`, error);
         return deny(500, (error && error.message) || String(error));
     }
 }

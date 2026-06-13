@@ -39,6 +39,10 @@ module WhatsAppNotifier
       provider_for(provider || @configuration.provider).delete_media(message_id: message_id, metadata: metadata)
     end
 
+    def refetch_media(message_id:, chat_id:, metadata: {}, provider: nil)
+      provider_for(provider || @configuration.provider).refetch_media(message_id: message_id, chat_id: chat_id, metadata: metadata)
+    end
+
     def list_chats(metadata: {}, provider: nil)
       provider_for(provider || @configuration.provider).list_chats(metadata: metadata)
     end

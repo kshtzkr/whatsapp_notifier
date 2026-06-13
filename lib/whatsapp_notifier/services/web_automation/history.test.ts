@@ -14,17 +14,37 @@ import {
     replayHistory,
     chatsResponse,
     historyResponse,
+    findMessage,
+    refetchResponse,
     type GatedClient,
-    type HistoryDeps
+    type HistoryDeps,
+    type RefetchDeps
 } from './history';
 import { configureInbound, loadTargets, resetInboundState, type ChatLike } from './inbound';
+import {
+    configureMedia,
+    resetMediaState,
+    mediaExists,
+    userDirBytes,
+    resolveMediaForMessage,
+    type MediaResolution
+} from './media';
 
 const root = mkdtempSync(join(tmpdir(), 'wa-history-'));
 const dirFor = (userId: string) => join(root, `session-user-${userId}`);
 
+let mediaCase = 0;
+
 beforeEach(() => {
     resetInboundState();
     configureInbound(dirFor);
+    // Each example gets a fresh media root so the refetch store tests don't
+    // bleed bytes into one another. The resolver must be PURE (no side effect
+    // per call) — bump the case index once here, not inside the closure.
+    const mediaRoot = join(root, `media-${mediaCase++}`);
+    configureMedia(() => mediaRoot);
+    resetMediaState();
+    delete process.env.WHATSAPP_MEDIA_MAX_USER_BYTES;
 });
 
 afterAll(() => {
@@ -413,4 +433,263 @@ test('historyResponse maps a fetch failure to a 500 with the message', async () 
     const res = await historyResponse('1', { chatId: CUST }, undefined, undefined, deps);
     expect(res.status).toBe(500);
     expect(await res.json()).toEqual({ success: false, error: 'chat hydration failed' });
+});
+
+// ── findMessage ──
+
+const MSG_ID = 'true_919999000001@c.us_ABC';
+
+function refetchDepsWith(
+    data: GatedClient,
+    overrides: Partial<RefetchDeps> = {}
+): RefetchDeps & { getClientCalls: number } {
+    const deps: any = {
+        getClientCalls: 0,
+        hasPaired: () => true,
+        getClient: async () => { deps.getClientCalls += 1; return data; },
+        getMessageById: async (client: any, id: string) => client.getMessageById(id),
+        resolveChat: async (client: any, chatId: string) => {
+            try { return await client.getChatById(chatId); } catch (_) { return null; }
+        },
+        rememberTarget: () => {},
+        // Default fake media pipeline — overridden per test.
+        resolveMedia: async (): Promise<MediaResolution> => ({
+            mediaStatus: 'available', mediaMime: 'image/jpeg', mediaFilename: 'beach.jpg', mediaSize: 10
+        }),
+        ...overrides
+    };
+    return deps;
+}
+
+test('findMessage returns the direct getMessageById hit without scanning the chat', async () => {
+    let scanned = 0;
+    const deps = refetchDepsWith(readyClient(), {
+        resolveChat: async () => { scanned += 1; return null; }
+    });
+    const client = { getMessageById: async (id: string) => ({ id: { _serialized: id }, hasMedia: true }) };
+
+    const found = await findMessage(deps, client, MSG_ID, CUST);
+    expect(found.id._serialized).toBe(MSG_ID);
+    expect(scanned).toBe(0); // fast path hit → no fallback scan
+});
+
+test('findMessage falls back to a chat scan when getMessageById misses', async () => {
+    const target = { id: { _serialized: MSG_ID }, hasMedia: true };
+    const deps = refetchDepsWith(readyClient(), {
+        getMessageById: async () => { throw new Error('not hydrated'); },
+        resolveChat: async () => chatWith([
+            { id: { _serialized: 'other' } },
+            target
+        ])
+    });
+
+    const found = await findMessage(deps, {}, MSG_ID, CUST);
+    expect(found).toBe(target);
+});
+
+test('findMessage returns null when neither path turns the message up', async () => {
+    // getMessageById returns null, chat scan finds no matching id.
+    const nullDirect = refetchDepsWith(readyClient(), {
+        getMessageById: async () => null,
+        resolveChat: async () => chatWith([{ id: { _serialized: 'someone-else' } }])
+    });
+    expect(await findMessage(nullDirect, {}, MSG_ID, CUST)).toBeNull();
+
+    // Chat never materialized.
+    const noChat = refetchDepsWith(readyClient(), {
+        getMessageById: async () => null,
+        resolveChat: async () => null
+    });
+    expect(await findMessage(noChat, {}, MSG_ID, CUST)).toBeNull();
+
+    // fetchMessages throws → swallowed → null (not a 500).
+    const throwing = refetchDepsWith(readyClient(), {
+        getMessageById: async () => null,
+        resolveChat: async () => ({ fetchMessages: async () => { throw new Error('boom'); } })
+    });
+    expect(await findMessage(throwing, {}, MSG_ID, CUST)).toBeNull();
+
+    // Non-array fetchMessages result tolerated.
+    const nonArray = refetchDepsWith(readyClient(), {
+        getMessageById: async () => null,
+        resolveChat: async () => ({ fetchMessages: async () => undefined as any })
+    });
+    expect(await findMessage(nonArray, {}, MSG_ID, CUST)).toBeNull();
+});
+
+// ── refetchResponse gating ──
+
+test('refetchResponse enforces X-WA-Token before touching any client', async () => {
+    const deps = refetchDepsWith(readyClient(), { hasPaired: () => { throw new Error('gate must not run'); } });
+
+    const res = await refetchResponse('1', { messageId: MSG_ID, chatId: CUST }, 'wrong', 'expected', deps);
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ success: false, error: 'unauthorized' });
+    expect(deps.getClientCalls).toBe(0);
+});
+
+test('refetchResponse rejects a missing/unsanitizable messageId or non-1:1 chatId before the gate', async () => {
+    const deps = refetchDepsWith(readyClient(), { hasPaired: () => { throw new Error('gate must not run'); } });
+
+    // Bad messageId.
+    for (const body of [undefined, {}, { messageId: '', chatId: CUST }, { messageId: '//', chatId: CUST }]) {
+        const res = await refetchResponse('1', body, undefined, undefined, deps);
+        expect(res.status).toBe(422);
+        expect((await res.json()).error).toMatch(/messageId/);
+    }
+    // Good messageId, bad chatId.
+    for (const body of [{ messageId: MSG_ID }, { messageId: MSG_ID, chatId: '12@g.us' }]) {
+        const res = await refetchResponse('1', body, undefined, undefined, deps);
+        expect(res.status).toBe(422);
+        expect((await res.json()).error).toMatch(/chatId/);
+    }
+    expect(deps.getClientCalls).toBe(0);
+});
+
+test('refetchResponse fast-rejects a never-paired user WITHOUT creating a client', async () => {
+    const deps = refetchDepsWith(readyClient(), { hasPaired: () => false });
+    const res = await refetchResponse('1', { messageId: MSG_ID, chatId: CUST }, undefined, undefined, deps);
+    expect(res.status).toBe(401);
+    expect((await res.json()).error).toMatch(/pair via QR/);
+    expect(deps.getClientCalls).toBe(0);
+});
+
+test('refetchResponse answers 401 for a paired but not-ready client', async () => {
+    const deps = refetchDepsWith(readyClient({ ready: false }));
+    const res = await refetchResponse('1', { messageId: MSG_ID, chatId: CUST }, undefined, undefined, deps);
+    expect(res.status).toBe(401);
+    expect((await res.json()).error).toBe('User not authenticated');
+});
+
+// ── refetchResponse logic ──
+
+test('refetchResponse downloads, stores (cap-enforced) and reports the media available', async () => {
+    process.env.WHATSAPP_MEDIA_MAX_USER_BYTES = '12';
+    // A live message whose downloadMedia yields 10 bytes — routed through the
+    // REAL resolveMediaForMessage so the store + cap path is exercised end to end.
+    const liveMsg = {
+        from: CUST,
+        id: { _serialized: MSG_ID },
+        timestamp: 1717000000,
+        type: 'image',
+        hasMedia: true,
+        _data: { size: 1024, mimetype: 'image/jpeg' },
+        downloadMedia: async () => ({
+            data: Buffer.from('jpeg-bytes').toString('base64'),
+            mimetype: 'image/jpeg',
+            filename: 'beach.jpg'
+        })
+    };
+    const data = readyClient({ client: { getMessageById: async () => liveMsg } });
+    const deps = refetchDepsWith(data, { resolveMedia: resolveMediaForMessage });
+
+    const res = await refetchResponse('7', { messageId: MSG_ID, chatId: CUST }, undefined, undefined, deps);
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+        success: true,
+        messageId: MSG_ID,
+        mediaStatus: 'available',
+        mediaMime: 'image/jpeg',
+        mediaFilename: 'beach.jpg',
+        mediaSize: 10
+    });
+    expect(mediaExists('7', MSG_ID)).not.toBeNull();  // bytes are on disk for GET /media
+    expect(userDirBytes('7')).toBe(10);
+    expect(data.lastUsed).toBeGreaterThan(0);
+});
+
+test('refetchResponse evicts the user oldest when the refetch blows the per-user cap', async () => {
+    process.env.WHATSAPP_MEDIA_MAX_USER_BYTES = '12';
+    // Pre-fill the user with an older 8-byte item via the real pipeline.
+    const older = {
+        from: CUST, id: { _serialized: 'older-msg' }, timestamp: 1, type: 'image', hasMedia: true,
+        _data: { mimetype: 'image/png' },
+        downloadMedia: async () => ({ data: Buffer.from('12345678').toString('base64'), mimetype: 'image/png' })
+    };
+    await resolveMediaForMessage('9', older);
+    expect(mediaExists('9', 'older-msg')).not.toBeNull();
+
+    const liveMsg = {
+        from: CUST, id: { _serialized: MSG_ID }, timestamp: 1717000000, type: 'image', hasMedia: true,
+        _data: { mimetype: 'image/jpeg' },
+        downloadMedia: async () => ({ data: Buffer.from('jpeg-bytes').toString('base64'), mimetype: 'image/jpeg' })
+    };
+    const deps = refetchDepsWith(
+        readyClient({ client: { getMessageById: async () => liveMsg } }),
+        { resolveMedia: resolveMediaForMessage }
+    );
+
+    const res = await refetchResponse('9', { messageId: MSG_ID, chatId: CUST }, undefined, undefined, deps);
+
+    expect(res.status).toBe(200);
+    // 8 + 10 = 18 > 12 → the older item rolled off, the refetched one kept.
+    expect(mediaExists('9', MSG_ID)).not.toBeNull();
+    expect(mediaExists('9', 'older-msg')).toBeNull();
+    expect(userDirBytes('9')).toBe(10);
+});
+
+test('refetchResponse 404s gone when the message is absent upstream', async () => {
+    const data = readyClient({ client: { getMessageById: async () => null, getChatById: async () => chatWith([]) } });
+    const deps = refetchDepsWith(data);
+
+    const res = await refetchResponse('1', { messageId: MSG_ID, chatId: CUST }, undefined, undefined, deps);
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ success: false, mediaStatus: 'unavailable', mediaError: 'gone' });
+});
+
+test('refetchResponse 404s gone when the found message carries no media', async () => {
+    const liveMsg = { id: { _serialized: MSG_ID }, hasMedia: false };
+    const deps = refetchDepsWith(readyClient({ client: { getMessageById: async () => liveMsg } }));
+
+    const res = await refetchResponse('1', { messageId: MSG_ID, chatId: CUST }, undefined, undefined, deps);
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ success: false, mediaStatus: 'unavailable', mediaError: 'gone' });
+});
+
+test('refetchResponse maps an unavailable download verdict to a 404 with its typed reason', async () => {
+    const liveMsg = { id: { _serialized: MSG_ID }, hasMedia: true };
+    const deps = refetchDepsWith(
+        readyClient({ client: { getMessageById: async () => liveMsg } }),
+        { resolveMedia: async () => ({ mediaStatus: 'unavailable', mediaError: 'expired' }) }
+    );
+
+    const res = await refetchResponse('1', { messageId: MSG_ID, chatId: CUST }, undefined, undefined, deps);
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ success: false, mediaStatus: 'unavailable', mediaError: 'expired' });
+});
+
+test('refetchResponse defaults a missing mediaError to gone and omits an absent filename', async () => {
+    // Unavailable verdict with NO mediaError → host still gets a typed 'gone'.
+    const liveMsg = { id: { _serialized: MSG_ID }, hasMedia: true };
+    const goneless = refetchDepsWith(
+        readyClient({ client: { getMessageById: async () => liveMsg } }),
+        { resolveMedia: async () => ({ mediaStatus: 'unavailable' }) }
+    );
+    expect(await (await refetchResponse('1', { messageId: MSG_ID, chatId: CUST }, undefined, undefined, goneless)).json())
+        .toEqual({ success: false, mediaStatus: 'unavailable', mediaError: 'gone' });
+
+    // Available verdict with no filename → mediaFilename omitted from the body.
+    const noName = refetchDepsWith(
+        readyClient({ client: { getMessageById: async () => liveMsg } }),
+        { resolveMedia: async () => ({ mediaStatus: 'available', mediaMime: 'audio/ogg', mediaSize: 3 }) }
+    );
+    const body = await (await refetchResponse('1', { messageId: MSG_ID, chatId: CUST }, undefined, undefined, noName)).json();
+    expect(body).toEqual({ success: true, messageId: MSG_ID, mediaStatus: 'available', mediaMime: 'audio/ogg', mediaSize: 3 });
+    expect('mediaFilename' in body).toBe(false);
+});
+
+test('refetchResponse maps an unexpected error to a 500', async () => {
+    const deps = refetchDepsWith(
+        readyClient({ client: { getMessageById: async () => { throw new Error('store exploded'); } } }),
+        // getMessageById throwing is swallowed by findMessage; force the 500 via resolveMedia.
+        {
+            getMessageById: async () => ({ id: { _serialized: MSG_ID }, hasMedia: true }),
+            resolveMedia: async () => { throw new Error('store exploded'); }
+        }
+    );
+
+    const res = await refetchResponse('1', { messageId: MSG_ID, chatId: CUST }, undefined, undefined, deps);
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ success: false, error: 'store exploded' });
 });
