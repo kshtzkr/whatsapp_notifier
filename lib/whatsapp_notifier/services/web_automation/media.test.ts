@@ -473,6 +473,18 @@ test('resolveMediaForMessage falls back to the from-timestamp message id', async
     expect(mediaExists(USER, '919999000001@c.us-1717000000')).not.toBeNull();
 });
 
+// The fallback must mirror normalizeInbound's COUNTERPARTY keying: on fromMe
+// the `from` is the operator's own jid, shared by every chat — keying on it
+// stores the bytes under an id the wire never advertised (host GET 404s) and
+// collides two same-second sends to different customers on the same path.
+test('resolveMediaForMessage keys the fromMe fallback id on the counterparty', async () => {
+    const msg = mediaMsg({ id: undefined, fromMe: true, from: '919000000001@c.us', to: '919999000002@c.us' });
+    const verdict = await resolveMediaForMessage(USER, msg);
+    expect(verdict.mediaStatus).toBe('available');
+    expect(mediaExists(USER, '919999000002@c.us-1717000000')).not.toBeNull();   // keyed on `to`…
+    expect(mediaExists(USER, '919000000001@c.us-1717000000')).toBeNull();       // …never the operator
+});
+
 test('resolveMediaForMessage fills mime/filename gaps and omits a missing filename', async () => {
     const msg = mediaMsg(
         { downloadMedia: async () => ({ data: Buffer.from('x').toString('base64') }) },

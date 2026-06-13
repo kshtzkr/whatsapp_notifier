@@ -320,8 +320,13 @@ export async function resolveMediaForMessage(
     deps: { timeoutMs?: number } = {}
 ): Promise<MediaResolution> {
     // Must mirror normalizeInbound's messageId fallback (inbound.ts) so the
-    // stored file is addressable by the id the host received.
-    const messageId = (msg?.id && msg.id._serialized) || `${msg?.from || ''}-${msg?.timestamp}`;
+    // stored file is addressable by the id the host received. Like there, the
+    // fallback keys on the COUNTERPARTY: on fromMe the `from` is the
+    // operator's own jid, shared by every chat — keying on it would store the
+    // bytes under one id while the wire advertises another (host GET 404s),
+    // and two same-second sends to different customers would collide on disk.
+    const counterparty = (msg?.fromMe ? msg?.to : msg?.from) || '';
+    const messageId = (msg?.id && msg.id._serialized) || `${counterparty}-${msg?.timestamp}`;
     if (!mediaPaths(userId, messageId)) {
         return { mediaStatus: 'unavailable', mediaError: 'invalid_id' };
     }
