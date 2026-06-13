@@ -44,7 +44,7 @@ conversation — not just customer replies and platform sends.
   the sent message id in a per-user, bounded (200 ids), 10-minute-TTL
   in-memory registry; the fromMe capture leg drops registry hits ENTIRELY —
   no media resolution (a media send no longer re-downloads its own
-  attachment on the sending Chromium and burns the shared 5GB disk cap on
+  attachment on the sending Chromium and churns the per-user media cap with
   bytes the host never fetches), no queue slot, no webhook push. Messages
   typed on the phone and reconnect-backfill replays are never in the
   registry and flow through unchanged; hosts keep the id-dedupe for the
@@ -125,6 +125,40 @@ Sync OLD conversations — chats that predate the pairing — on demand.
   ready) included. The adapter mirrors the service's limit clamp so a wild
   host value can't balloon a request.
 - The ejected service now ships `history.ts`.
+
+### Media cap & on-demand re-download
+WhatsApp's tap-to-download model: keep RECENT media per user, roll the rest
+off, and re-pull any one item on demand when an operator opens its bubble.
+
+- **Per-user 1GB rolling cap with LRU eviction** (`WHATSAPP_MEDIA_MAX_USER_BYTES`,
+  default 1GB, NaN-safe). The cap is enforced AFTER each successful write:
+  `enforceUserCap` deletes the user's OLDEST media (by `capturedAt`/mtime,
+  same ordering as the TTL sweep) until they fit again. Because we
+  download-then-evict, a user is **never skipped on disk grounds** — the old
+  global `disk_full` skip (which starved real customer inbound media once the
+  shared cap filled) is gone. `downloadPolicy` no longer returns `disk_full`;
+  the per-MESSAGE size gate (16MB inline / `WHATSAPP_MEDIA_MAX_BYTES` for
+  documents) stays, and `WHATSAPP_MEDIA_MAX_DISK_BYTES` remains only an
+  absolute global backstop. Each user's cap is independent; eviction touches
+  only that user's directory.
+- **`POST /media/:userId/refetch`** `{ messageId, chatId }` re-downloads ONE
+  message's media on demand. Token-gated and paired/ready-gated exactly like
+  `/history`; `chatId` is normalized + `@c.us`-validated and `messageId`
+  sanitized. The service resolves the message (`getMessageById`, falling back
+  to a chat-history scan), runs it through the live download pipeline
+  (per-message size cap + 30s timeout + cap-enforced store), and answers
+  `{ success: true, messageId, mediaStatus: 'available', mediaMime,
+  mediaFilename, mediaSize }`. After that the host fetches the bytes with the
+  usual `GET /media`. Media gone upstream (deleted, too old) → `404
+  { success: false, mediaStatus: 'unavailable', mediaError: 'gone' }`.
+- Hosts can now **lazily re-download evicted or TTL-expired media**: when a
+  `GET /media` 404s for a bubble the operator opened, call `refetch_media`
+  first, then re-`GET`. Old media no longer needs to live on disk forever.
+- Ruby API: `WhatsAppNotifier.refetch_media(message_id:, chat_id:, metadata:)`
+  → `{ mime:, filename:, size:, status: }` on success, or `nil` when the media
+  is gone upstream (404) — same nil-on-404 contract as `fetch_media`, so a host
+  that gets `nil` can grey the bubble out. `respond_to?`-guarded through the
+  provider/client/module chain like the other media helpers.
 
 ## [0.7.0] - 2026-06-11
 
