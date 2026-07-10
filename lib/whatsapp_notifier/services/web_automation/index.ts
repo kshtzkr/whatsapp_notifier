@@ -32,7 +32,7 @@ import {
     mediaGetResponse,
     mediaDeleteResponse
 } from './media';
-import { sentMessageId, sendValidationError, captionOptions } from './send';
+import { sentMessageId, sendValidationError, fetchMedia, captionOptions } from './send';
 
 const app = new Hono();
 const port = Number(process.env.PORT || 3001);
@@ -213,8 +213,8 @@ async function sendMessageWithRetry(client: Client, clientData: ClientData, chat
         try {
             if (mediaUrl) {
                 const { MessageMedia } = require('whatsapp-web.js');
-                const media = await MessageMedia.fromUrl(mediaUrl);
-                // No-caption handling lives in send.ts (unit-tested).
+                // unsafeMime + no-caption handling live in send.ts (unit-tested).
+                const media = await fetchMedia(MessageMedia, mediaUrl);
                 return await client.sendMessage(chatId, media, captionOptions(message));
             }
 

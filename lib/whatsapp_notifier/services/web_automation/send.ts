@@ -33,6 +33,23 @@ export function sendValidationError(body: { to?: unknown; message?: unknown; med
     return null;
 }
 
+// The whatsapp-web.js surface fetchMedia needs — injected so the fetch
+// options are unit-testable without booting the real library. Promise<any>
+// on purpose: the real MessageMedia comes from require() untyped, and the
+// result feeds client.sendMessage's MessageContent parameter.
+type MediaFactory = { fromUrl: (url: string, options?: object) => Promise<any> };
+
+// Downloads the outgoing attachment for a media send.
+//
+// unsafeMime: hosts hand us extension-less URLs (Rails ActiveStorage
+// blob/proxy paths), and whatsapp-web.js refuses to guess a MIME type from
+// a URL without an extension ("Unable to determine MIME type using URL").
+// unsafeMime downloads anyway and trusts the response Content-Type header,
+// which those hosts set correctly.
+export async function fetchMedia(messageMedia: MediaFactory, mediaUrl: string) {
+    return messageMedia.fromUrl(mediaUrl, { unsafeMime: true });
+}
+
 // sendMessage options for a media send: caption only when there IS one. A
 // caption-less file arrives with message "" — omitting the key entirely
 // matches a hand-sent file instead of attaching an empty caption.

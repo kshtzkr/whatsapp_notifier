@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test';
-import { sentMessageId, sendValidationError, captionOptions } from './send';
+import { sentMessageId, sendValidationError, fetchMedia, captionOptions } from './send';
 
 // The id the host stores against its outbound record — it MUST be the real
 // serialized WhatsApp id so the fromMe echo of this send dedupes on it.
@@ -47,6 +47,23 @@ test('`to` is always required, media or not', () => {
     const error = '`to` and one of `message`/`mediaUrl` are required';
     expect(sendValidationError({ message: 'hello' })).toBe(error);
     expect(sendValidationError({ to: '', message: 'hello', mediaUrl: 'https://host/blob/1' })).toBe(error);
+});
+
+// ── media fetch options ──
+//
+// ActiveStorage blob/proxy URLs carry no file extension, so wwebjs's
+// URL-based MIME sniff throws ("Unable to determine MIME type using URL").
+// The send path MUST pass unsafeMime so the response Content-Type is used.
+test('fetchMedia downloads with unsafeMime so extension-less URLs work', async () => {
+    const calls: Array<[string, object | undefined]> = [];
+    const fakeMessageMedia = {
+        fromUrl: async (url: string, options?: object) => { calls.push([url, options]); return 'the-media'; }
+    };
+
+    const media = await fetchMedia(fakeMessageMedia, 'https://host/rails/active_storage/blobs/proxy/abc123');
+
+    expect(media).toBe('the-media');
+    expect(calls).toEqual([['https://host/rails/active_storage/blobs/proxy/abc123', { unsafeMime: true }]]);
 });
 
 // ── caption shape ──
