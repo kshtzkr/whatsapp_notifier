@@ -54,6 +54,13 @@ export const INBOUND_QUEUE_CAP = 1000;
 
 const inboundQueues = new Map<string, InboundMsg[]>();
 const outboundTargets = new Map<string, Set<string>>();
+// userId → (@lid privacy id → resolved phone @c.us). Learned whenever an @lid
+// is resolved to a phone (inbound contact lookup, fromMe live lookup, history
+// replay) and consulted by the fromMe leg, where msg.getContact() is no help
+// (it resolves the SENDER — the operator). Persisted per user next to
+// outbound_targets.json so a restart doesn't resume dropping operator
+// messages until the customer happens to write again.
+const lidAliases = new Map<string, Map<string, string>>();
 
 // How to resolve a user's on-disk session dir. index.ts wires this to
 // sessionDirForUser; tests point it at a tmp dir.
@@ -64,6 +71,34 @@ export function configureInbound(resolver: (userId: string) => string) {
 
 function targetsFilePath(userId: string) {
     return join(baseDirResolver(userId), 'outbound_targets.json');
+}
+
+function aliasesFilePath(userId: string) {
+    return join(baseDirResolver(userId), 'lid_aliases.json');
+}
+
+export function loadLidAliases(userId: string): Map<string, string> {
+    const cached = lidAliases.get(userId);
+    if (cached) return cached;
+
+    const map = new Map<string, string>();
+    try {
+        const p = aliasesFilePath(userId);
+        if (existsSync(p)) {
+            const obj = JSON.parse(readFileSync(p, 'utf8'));
+            if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+                for (const [lid, phone] of Object.entries(obj)) {
+                    if (typeof phone === 'string') map.set(lid, phone);
+                }
+            }
+        }
+    } catch (_) { /* corrupt/missing file → start empty */ }
+    lidAliases.set(userId, map);
+    return map;
+}
+
+export function resolveLidAlias(userId: string, lid: string): string | undefined {
+    return loadLidAliases(userId).get(lid);
 }
 
 export function loadTargets(userId: string): Set<string> {
@@ -82,15 +117,31 @@ export function loadTargets(userId: string): Set<string> {
     return set;
 }
 
-// After an @lid sender is resolved to a phone @c.us: if the resolved phone is
-// one of our outbound targets, remember the @lid alias too. rememberTarget at
-// send time only ever stores @c.us ids, but for privacy-number accounts the
-// *chat* is keyed by the @lid — so a reconnect backfill that replays targets
-// via chat-id lookup could never re-open that chat, permanently losing any
-// disconnect-window replies. Duplicate captures across the @c.us/@lid pair are
-// fine: the contract is at-least-once and the host dedupes on messageId.
+// After an @lid is resolved to a phone @c.us, two things are remembered:
+//
+// 1. The @lid → phone mapping itself (persisted, see lidAliases): the fromMe
+//    leg has no contact handle of its own, so without this map every operator
+//    message in an @lid-keyed chat would depend on a live lookup succeeding.
+// 2. If the resolved phone is one of our outbound targets, the @lid joins the
+//    allowlist too. rememberTarget at send time only ever stores @c.us ids,
+//    but for privacy-number accounts the *chat* is keyed by the @lid — so a
+//    reconnect backfill that replays targets via chat-id lookup could never
+//    re-open that chat, permanently losing any disconnect-window replies.
+//    Duplicate captures across the @c.us/@lid pair are fine: the contract is
+//    at-least-once and the host dedupes on messageId.
 export function rememberLidAlias(userId: string, rawFrom: string, resolvedFrom: string) {
     if (!rawFrom.endsWith('@lid')) return;
+    const aliases = loadLidAliases(userId);
+    if (aliases.get(rawFrom) !== resolvedFrom) {
+        aliases.set(rawFrom, resolvedFrom);
+        try {
+            const dir = baseDirResolver(userId);
+            if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+            writeFileSync(aliasesFilePath(userId), JSON.stringify(Object.fromEntries(aliases)));
+        } catch (e) {
+            console.error(`Failed to persist @lid alias for ${userId}`, e);
+        }
+    }
     if (loadTargets(userId).has(resolvedFrom)) rememberTarget(userId, rawFrom);
 }
 
@@ -300,15 +351,23 @@ async function processOwnMessage(userId: string, msg: any, deps: CaptureDeps) {
     const messageId = msg.id && msg.id._serialized;
     if (messageId && isSelfSend(userId, messageId)) return;
 
-    const to: string = msg.to || '';
+    const rawTo: string = msg.to || '';
+    let to = rawTo;
     // An @lid counterparty carries no phone number the host can thread on,
-    // and unlike inbound there is no contact handle to resolve it through
-    // (msg.getContact() resolves the SENDER — here, the operator). Rare in
-    // practice: operator-initiated chats are keyed by the phone @c.us. Drop
-    // with a log rather than forward an unmatchable body.
-    if (to.endsWith('@lid')) {
-        console.log(`Dropping fromMe message to unresolved @lid chat for ${userId}`);
-        return;
+    // and msg.getContact() is no help here (it resolves the SENDER — the
+    // operator). Newer WhatsApp keys some 1:1 chats by the @lid, so EVERY
+    // operator-phone message in such a chat used to hit an unconditional
+    // drop while the customer's side flowed — half the conversation lost.
+    // Resolve it instead, BEFORE any media download (a dropped message must
+    // not have cost one): the alias map the inbound leg learns first, then
+    // one guarded live lookup. Only when both fail is the message dropped —
+    // now the rare case, not every @lid-keyed chat.
+    if (rawTo.endsWith('@lid')) {
+        to = resolveLidAlias(userId, rawTo) || await resolveOwnLidCounterparty(userId, rawTo, msg) || '';
+        if (!to) {
+            console.log(`Dropping fromMe message to unresolved @lid chat for ${userId}`);
+            return;
+        }
     }
 
     // Same kept-message-earns-the-download rule as inbound: every resolver
@@ -319,15 +378,50 @@ async function processOwnMessage(userId: string, msg: any, deps: CaptureDeps) {
     }
 
     const inbound = normalizeInbound(msg, media);
+    // Thread on the resolved phone: the host matches `to` against its own
+    // recipient records, and a raw @lid would never match. The @lid is still
+    // fine as normalizeInbound's fallback-id key — any stable counterparty
+    // string dedupes correctly.
+    inbound.to = to;
 
     // A fromMe message to a brand-new number means the operator opened the
     // conversation in the WhatsApp app — allowlist the chat exactly like
     // /send does for its recipients, so the reconnect backfill can replay
-    // this conversation after a disconnect window too.
+    // this conversation after a disconnect window too. For an @lid-keyed
+    // chat the alias call ALSO allowlists the @lid id itself — the id the
+    // chat is actually reachable by (see rememberLidAlias).
     rememberTarget(userId, to);
+    if (rawTo.endsWith('@lid')) rememberLidAlias(userId, rawTo, to);
 
     enqueueInbound(userId, inbound);
     if (deps.push) deps.push(userId, inbound);
+}
+
+// Live fallback for a fromMe @lid counterparty with no learned alias yet
+// (e.g. right after a restart, before the customer writes again). Every wwebjs
+// Message carries its Client, and client.getContactById(<@lid>) is the exact
+// call the inbound leg's msg.getContact() makes for @lid senders — the one
+// path proven to yield the real phone in production. One roundtrip, guarded;
+// a hit is fed into rememberLidAlias so the next fromMe message resolves from
+// the map. contact.id.user is trusted only when the contact id itself is
+// phone-keyed — an @lid contact id would otherwise mint a bogus "phone" out
+// of the privacy id's own digits.
+async function resolveOwnLidCounterparty(userId: string, rawTo: string, msg: any): Promise<string | null> {
+    try {
+        const client = msg.client;
+        if (!client || typeof client.getContactById !== 'function') return null;
+        const contact = await client.getContactById(rawTo);
+        const num = contact && (contact.number ||
+            (contact.id && String(contact.id._serialized || '').endsWith('@c.us') && contact.id.user));
+        const digits = num ? String(num).replace(/\D/g, '') : '';
+        if (!digits) return null;
+        const resolved = `${digits}@c.us`;
+        rememberLidAlias(userId, rawTo, resolved);
+        return resolved;
+    } catch (e) {
+        console.error(`fromMe @lid contact lookup failed for ${userId}`, e);
+        return null;
+    }
 }
 
 // Minimal slice of whatsapp-web.js Client that backfill needs — a seam so the
@@ -385,6 +479,10 @@ export async function backfillTargets(
 export function clearInbound(userId: string) {
     inboundQueues.delete(userId);
     outboundTargets.delete(userId);
+    // Same resurrection hazard as the allowlist: the on-disk lid_aliases.json
+    // was just wiped with the session dir, and a re-pair (possibly a DIFFERENT
+    // WhatsApp number) must not inherit the old pairing's @lid mappings.
+    lidAliases.delete(userId);
     // Self-send echo ids belong to the old pairing too — and suppression must
     // never leak across a re-pair (however unlikely an id collision is).
     selfSendIds.delete(userId);
@@ -394,5 +492,6 @@ export function clearInbound(userId: string) {
 export function resetInboundState() {
     inboundQueues.clear();
     outboundTargets.clear();
+    lidAliases.clear();
     selfSendIds.clear();
 }
