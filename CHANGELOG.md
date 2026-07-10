@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.8.2] - 2026-07-10
+
+Production fix: every operator-phone (fromMe) message in an @lid-keyed chat
+was silently dropped — two-way sync worked customer→host, but the operator's
+side of those conversations never arrived.
+
+- **Resolve @lid chats on the operator-sent (fromMe) leg.** Newer WhatsApp
+  keys some 1:1 chats by an @lid privacy id. The inbound leg already
+  resolves those senders to the real phone, but `processOwnMessage` dropped
+  every fromMe message to an @lid chat unconditionally (`Dropping fromMe
+  message to unresolved @lid chat`) — seen live in production (chat
+  `125417440686124@lid`: customer messages flowed as `919882536803@c.us`,
+  operator replies vanished). The counterparty now resolves in order:
+  (1) the learned @lid → phone alias map, recorded whenever any leg
+  resolves an @lid; (2) one guarded live `getContactById(<@lid>)` lookup —
+  the exact call the inbound leg is proven on — whose hit is learned back
+  into the map; (3) only when both fail, the existing logged drop (now
+  genuinely rare).
+- **Alias map persisted per user** (`lid_aliases.json`, stored next to
+  `outbound_targets.json` in the session dir, wiped by `POST /logout`), so
+  a service restart doesn't resume dropping operator messages until the
+  customer happens to write again.
+- **History replay resolves fromMe @lid items too.** `POST /history` for a
+  phone whose chat is @lid-keyed now rewrites fromMe counterparties to the
+  requested `@c.us` chat id (which IS that @lid's phone) and learns the
+  alias, instead of forwarding an unmatchable @lid — so a history sync can
+  backfill the operator messages the old drop lost.
+- Wire shape unchanged: resolved payloads are indistinguishable from normal
+  `@c.us` fromMe events. Hosts need no changes.
+
 ## [0.8.1] - 2026-07-10
 
 Two production file-send fixes on the service's `POST /send` path.
