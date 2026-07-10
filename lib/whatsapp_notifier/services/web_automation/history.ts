@@ -13,7 +13,9 @@ import {
     InboundMediaInfo,
     ChatLike,
     shouldCapture,
-    normalizeInbound
+    normalizeInbound,
+    resolveLidAlias,
+    rememberLidAlias
 } from './inbound';
 import { verifyMediaToken, MediaResolution, sanitizeId } from './media';
 
@@ -96,12 +98,37 @@ export function historyMediaInfo(): InboundMediaInfo {
 // host threads whole conversations. Messages failing shouldCapture (system
 // events, status, group posts) are skipped. Returned oldest-first so the
 // host can ingest in thread order.
-export async function replayHistory(userId: string, chat: ChatLike, limit: number): Promise<InboundMsg[]> {
+//
+// fromMe items in an @lid-keyed chat carry the @lid at `to` — unmatchable
+// host-side, exactly the live-capture bug. requestedChatId is the @c.us id
+// the host asked POST /history for (normalizeHistoryChatId enforces the
+// suffix), and fetchMessages only ever returns THIS chat's messages, so that
+// id IS the @lid's phone: resolve with it and learn the alias — which is also
+// how a restarted service can relearn mappings (and backfill previously
+// dropped operator messages) without waiting for the customer to write.
+// Without it (test seam) the learned map is the fallback; what neither
+// resolves is skipped — the same never-forward-an-unmatchable-counterparty
+// rule as the live fromMe leg.
+export async function replayHistory(
+    userId: string,
+    chat: ChatLike,
+    limit: number,
+    requestedChatId?: string
+): Promise<InboundMsg[]> {
     const msgs = await chat.fetchMessages({ limit });
-    return (Array.isArray(msgs) ? msgs : [])
-        .filter((m) => shouldCapture(userId, m))
-        .map((m) => normalizeInbound(m, m.hasMedia ? historyMediaInfo() : undefined))
-        .sort((a, b) => a.timestamp - b.timestamp);
+    const out: InboundMsg[] = [];
+    for (const m of (Array.isArray(msgs) ? msgs : [])) {
+        if (!shouldCapture(userId, m)) continue;
+        const inbound = normalizeInbound(m, m.hasMedia ? historyMediaInfo() : undefined);
+        if (inbound.fromMe && inbound.to && inbound.to.endsWith('@lid')) {
+            const resolved = requestedChatId || resolveLidAlias(userId, inbound.to);
+            if (!resolved) continue;
+            if (requestedChatId) rememberLidAlias(userId, inbound.to, requestedChatId);
+            inbound.to = resolved;
+        }
+        out.push(inbound);
+    }
+    return out.sort((a, b) => a.timestamp - b.timestamp);
 }
 
 // ── Route responses ──
@@ -193,7 +220,7 @@ export async function historyResponse(
         const chat = await deps.resolveChat(gate.client, chatId);
         if (!chat) return deny(404, 'chat not found');
 
-        const messages = await replayHistory(userId, chat, clampHistoryLimit(body && body.limit));
+        const messages = await replayHistory(userId, chat, clampHistoryLimit(body && body.limit), chatId);
 
         // A synced chat is a conversation of record: allowlist it like a /send
         // recipient so disconnect-window replies to it backfill on reconnect.

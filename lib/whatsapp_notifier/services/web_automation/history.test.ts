@@ -20,7 +20,14 @@ import {
     type HistoryDeps,
     type RefetchDeps
 } from './history';
-import { configureInbound, loadTargets, resetInboundState, type ChatLike } from './inbound';
+import {
+    configureInbound,
+    loadTargets,
+    resetInboundState,
+    rememberLidAlias,
+    resolveLidAlias,
+    type ChatLike
+} from './inbound';
 import {
     configureMedia,
     resetMediaState,
@@ -231,6 +238,44 @@ test('replayHistory returns oldest-first even when the chat yields newest-first'
     expect(history.map((m) => m.messageId)).toEqual(['m1', 'm2', 'm3']);
 });
 
+// fromMe items in an @lid-keyed chat: the host requested this history by the
+// phone @c.us, and fetchMessages only returns THIS chat's messages — so the
+// requested id IS the @lid's phone. Same prod chat shape as the live-capture
+// bug (125417440686124@lid): without resolution these were unmatchable.
+test('replayHistory resolves fromMe @lid counterparties to the requested chat id and learns the alias', async () => {
+    const LID = '125417440686124@lid';
+    const history = await replayHistory('h1', chatWith([
+        msg({ body: 'customer says hi', timestamp: 1 }),
+        msg({
+            fromMe: true, from: OPERATOR, to: LID, body: 'Yes cool',
+            id: { _serialized: 'op1' }, timestamp: 2
+        })
+    ]), 50, CUST);
+
+    expect(history.length).toBe(2);
+    expect(history[0].from).toBe(CUST);                              // inbound leg untouched
+    expect(history[1]).toMatchObject({ fromMe: true, to: CUST, body: 'Yes cool' });
+    expect(resolveLidAlias('h1', LID)).toBe(CUST); // learned → live fromMe capture resolves too
+});
+
+test('replayHistory falls back to the learned alias map and skips unresolvable fromMe @lid items', async () => {
+    const LID = '125417440686124@lid';
+
+    // No requested chat id (test seam) but a learned alias → resolved.
+    rememberLidAlias('h2', LID, CUST);
+    const withAlias = await replayHistory('h2', chatWith([
+        msg({ fromMe: true, from: OPERATOR, to: LID, id: { _serialized: 'op1' } })
+    ]), 50);
+    expect(withAlias.length).toBe(1);
+    expect(withAlias[0].to).toBe(CUST);
+
+    // Neither → skipped: never forward an unmatchable counterparty.
+    const unresolved = await replayHistory('h3', chatWith([
+        msg({ fromMe: true, from: OPERATOR, to: LID, id: { _serialized: 'op2' } })
+    ]), 50);
+    expect(unresolved).toEqual([]);
+});
+
 test('replayHistory passes the limit through and tolerates a non-array result', async () => {
     let seenLimit = 0;
     await replayHistory('1', chatWith([], ({ limit }) => { seenLimit = limit; }), 37);
@@ -396,6 +441,28 @@ test('historyResponse replays the chat, clamps the limit and allowlists the chat
     expect(seenLimit).toBe(200);
     expect(loadTargets('7').has(CUST)).toBe(true); // joins the reconnect allowlist
     expect(data.lastUsed).toBeGreaterThan(0);
+});
+
+// End-to-end shape of the prod incident: the host asks for a phone whose chat
+// is @lid-keyed (getChatById fails → index.ts's contact fallback resolves it),
+// and the replayed fromMe items must come back threaded on that phone.
+test('historyResponse resolves fromMe @lid items in an @lid-keyed chat to the requested phone', async () => {
+    const LID = '125417440686124@lid';
+    const deps = depsWith(readyClient(), {
+        resolveChat: async () => chatWith([
+            msg({ fromMe: true, from: OPERATOR, to: LID, body: 'No still not', id: { _serialized: 'op1' } })
+        ])
+    });
+
+    const res = await historyResponse('h9', { chatId: CUST }, undefined, undefined, deps);
+
+    expect(res.status).toBe(200);
+    const payload = await res.json();
+    expect(payload.messages).toEqual([{
+        from: OPERATOR, to: CUST, fromMe: true, body: 'No still not',
+        messageId: 'op1', timestamp: 1717000000, type: 'chat'
+    }]);
+    expect(resolveLidAlias('h9', LID)).toBe(CUST);
 });
 
 test('historyResponse defaults the limit to 50 when the body omits it', async () => {

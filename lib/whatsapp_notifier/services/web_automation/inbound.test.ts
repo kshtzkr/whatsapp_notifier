@@ -10,6 +10,7 @@ import {
     loadTargets,
     rememberTarget,
     rememberLidAlias,
+    resolveLidAlias,
     rememberSelfSend,
     isSelfSend,
     resolveChat,
@@ -158,13 +159,17 @@ test('rememberLidAlias stores the @lid chat id for a known target', () => {
     expect(loadTargets('la1').has(CUST)).toBe(true);
 });
 
-test('rememberLidAlias ignores unknown senders and non-@lid raw ids', () => {
+test('rememberLidAlias keeps unknown senders off the allowlist and skips non-@lid raw ids', () => {
     rememberTarget('la2', CUST);
 
     rememberLidAlias('la2', '999@lid', '918888000000@c.us'); // resolved not a target
     rememberLidAlias('la2', CUST, CUST);                     // raw is already @c.us
 
     expect(loadTargets('la2')).toEqual(new Set([CUST]));
+    // The mapping itself IS learned for the unknown sender (the fromMe leg
+    // needs it regardless of the allowlist), but never for a non-@lid raw id.
+    expect(resolveLidAlias('la2', '999@lid')).toBe('918888000000@c.us');
+    expect(resolveLidAlias('la2', CUST)).toBeUndefined();
 });
 
 // backfill resolves chats directly, then via contact, and skips dead targets
@@ -414,11 +419,11 @@ test('processInbound resolves media for operator-sent media messages', async () 
     expect(drained[0].mediaSize).toBe(10);
 });
 
-// An @lid counterparty on fromMe has no phone the host can thread on and no
-// contact handle to resolve it through (getContact resolves the sender — the
-// operator). Dropped with a log, before any download — same disk-hygiene rule
-// as the inbound @lid drop.
-test('processInbound drops a fromMe message to an @lid chat before any download', async () => {
+// An @lid counterparty on fromMe that resolves through NEITHER the learned
+// alias map NOR the live contact lookup (here: a message with no client
+// handle at all) stays dropped with a log, before any download — same
+// disk-hygiene rule as the inbound @lid drop.
+test('processInbound drops a fromMe message to an unresolvable @lid chat before any download', async () => {
     let resolveCalls = 0;
     const m = mediaMsg({ fromMe: true, from: OPERATOR, to: LID_FROM });
 
@@ -429,6 +434,115 @@ test('processInbound drops a fromMe message to an @lid chat before any download'
     expect(resolveCalls).toBe(0);
     expect(drainInbound('fm4')).toEqual([]);
     expect(loadTargets('fm4').size).toBe(0); // an unmatchable chat earns no allowlist slot
+});
+
+// ── fromMe @lid resolution (the two-way rollout blocker) ──
+//
+// Prod evidence 2026-07-10, chat 125417440686124@lid: customer messages in
+// the chat resolved to the phone and flowed, while EVERY operator-phone
+// message hit the unconditional drop. Resolution order: learned alias map →
+// one live getContactById(<@lid>) lookup (the same call the inbound leg is
+// proven on) → logged drop.
+
+test('processInbound resolves a fromMe @lid counterparty from the learned alias map', async () => {
+    // The customer wrote earlier — the inbound leg learned the alias.
+    rememberLidAlias('fl1', LID_FROM, CUST);
+
+    let contactLookups = 0;
+    const m = msg({
+        fromMe: true, from: OPERATOR, to: LID_FROM, body: 'Yes cool',
+        client: { getContactById: async () => { contactLookups += 1; return { number: '919999000001' }; } }
+    });
+
+    const pushed: InboundMsg[] = [];
+    await processInbound('fl1', m, {
+        resolveMedia: async () => ({ mediaStatus: 'available' as const }),
+        push: (_u, inbound) => pushed.push(inbound)
+    });
+
+    const drained = drainInbound('fl1');
+    expect(drained.length).toBe(1);
+    expect(drained[0].fromMe).toBe(true);
+    expect(drained[0].to).toBe(CUST);                    // resolved phone, not the @lid
+    expect(drained[0].body).toBe('Yes cool');
+    expect(pushed).toEqual(drained);                     // webhook saw the same payload
+    expect(contactLookups).toBe(0);                      // map hit → no puppeteer roundtrip
+    expect(loadTargets('fl1').has(CUST)).toBe(true);     // allowlisted like any fromMe counterparty
+    expect(loadTargets('fl1').has(LID_FROM)).toBe(true); // the chat's REAL key joins the allowlist too
+});
+
+test('processInbound live-resolves a fromMe @lid chat and learns the alias for next time', async () => {
+    const seenIds: string[] = [];
+    const m = msg({
+        fromMe: true, from: OPERATOR, to: LID_FROM, body: 'No still not',
+        client: { getContactById: async (id: string) => { seenIds.push(id); return { number: '919999000001' }; } }
+    });
+
+    await processInbound('fl2', m, { resolveMedia: async () => ({ mediaStatus: 'available' as const }) });
+
+    const drained = drainInbound('fl2');
+    expect(drained.length).toBe(1);
+    expect(drained[0].to).toBe(CUST);
+    expect(seenIds).toEqual([LID_FROM]);                   // the inbound leg's exact lookup, by the @lid
+    expect(resolveLidAlias('fl2', LID_FROM)).toBe(CUST);   // learned → the next message is a map hit
+});
+
+test('live resolution trusts contact.id.user only when the contact id is phone-keyed', async () => {
+    // No `number`, but a @c.us-keyed contact id carries the phone at id.user.
+    const good = msg({
+        fromMe: true, from: OPERATOR, to: LID_FROM,
+        client: { getContactById: async () => ({ id: { user: '919999000001', _serialized: CUST } }) }
+    });
+    await processInbound('fl3', good, { resolveMedia: async () => ({ mediaStatus: 'available' as const }) });
+    expect(drainInbound('fl3')[0].to).toBe(CUST);
+
+    // An @lid-keyed contact id must NOT mint a bogus "phone" out of the
+    // privacy id's own digits — that message is unresolvable and dropped.
+    const bogus = msg({
+        fromMe: true, from: OPERATOR, to: LID_FROM, id: { _serialized: 'b1' },
+        client: { getContactById: async () => ({ id: { user: '125417440686124', _serialized: LID_FROM } }) }
+    });
+    await processInbound('fl4', bogus, { resolveMedia: async () => ({ mediaStatus: 'available' as const }) });
+    expect(drainInbound('fl4')).toEqual([]);
+    expect(resolveLidAlias('fl4', LID_FROM)).toBeUndefined();
+});
+
+test('processInbound still drops a fromMe @lid message when the live lookup throws', async () => {
+    let resolveCalls = 0;
+    const m = mediaMsg({
+        fromMe: true, from: OPERATOR, to: LID_FROM,
+        client: { getContactById: async () => { throw new Error('contact store not hydrated'); } }
+    });
+
+    await processInbound('fl5', m, {
+        resolveMedia: async () => { resolveCalls += 1; return { mediaStatus: 'available' as const }; }
+    });
+
+    expect(resolveCalls).toBe(0);                // dropped BEFORE any download
+    expect(drainInbound('fl5')).toEqual([]);
+    expect(loadTargets('fl5').size).toBe(0);
+});
+
+test('rememberLidAlias persists the @lid → phone mapping across a restart', () => {
+    rememberLidAlias('al1', LID_FROM, CUST);
+    expect(resolveLidAlias('al1', LID_FROM)).toBe(CUST);
+
+    const file = join(dirFor('al1'), 'lid_aliases.json');
+    expect(existsSync(file)).toBe(true);
+    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ [LID_FROM]: CUST });
+
+    resetInboundState(); // the restart: drop in-memory cache → must reload from disk
+    configureInbound(dirFor);
+    expect(resolveLidAlias('al1', LID_FROM)).toBe(CUST);
+});
+
+test('clearInbound drops the cached alias map so a re-pair cannot inherit old mappings', () => {
+    rememberLidAlias('al2', LID_FROM, CUST);
+    // Logout wipes the session dir (incl. lid_aliases.json) from disk...
+    rmSync(dirFor('al2'), { recursive: true, force: true });
+    // ...but without clearInbound the in-memory cache would still resolve.
+    clearInbound('al2');
+    expect(resolveLidAlias('al2', LID_FROM)).toBeUndefined();
 });
 
 // ── Self-send echo suppression ──
