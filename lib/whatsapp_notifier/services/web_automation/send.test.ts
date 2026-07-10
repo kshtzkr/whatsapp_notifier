@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test';
-import { sentMessageId } from './send';
+import { sentMessageId, sendValidationError, captionOptions } from './send';
 
 // The id the host stores against its outbound record — it MUST be the real
 // serialized WhatsApp id so the fromMe echo of this send dedupes on it.
@@ -17,4 +17,45 @@ test('sentMessageId falls back to null when no id is available', () => {
     expect(sentMessageId({})).toBeNull();                 // Message without an id
     expect(sentMessageId({ id: {} })).toBeNull();         // id without a serialization
     expect(sentMessageId({ id: { _serialized: '' } })).toBeNull(); // empty id is no id
+});
+
+// ── /send body validation ──
+//
+// Hosts attach files one-by-one with the caption only on the FIRST file, so
+// a file-only body (message "" + mediaUrl) is the NORMAL shape for files
+// 2..n of a batch — it must pass, not 422.
+test('file-only send (to + mediaUrl, no message) passes validation', () => {
+    expect(sendValidationError({ to: '919999000001', message: '', mediaUrl: 'https://host/blob/1' })).toBeNull();
+    expect(sendValidationError({ to: '919999000001', mediaUrl: 'https://host/blob/1' })).toBeNull();
+});
+
+test('message-only send still passes validation', () => {
+    expect(sendValidationError({ to: '919999000001', message: 'hello' })).toBeNull();
+});
+
+test('message + media together pass validation', () => {
+    expect(sendValidationError({ to: '919999000001', message: 'caption', mediaUrl: 'https://host/blob/1' })).toBeNull();
+});
+
+test('a body with nothing to deliver is rejected with 422 copy', () => {
+    const error = '`to` and one of `message`/`mediaUrl` are required';
+    expect(sendValidationError({ to: '919999000001' })).toBe(error);
+    expect(sendValidationError({ to: '919999000001', message: '', mediaUrl: '' })).toBe(error);
+});
+
+test('`to` is always required, media or not', () => {
+    const error = '`to` and one of `message`/`mediaUrl` are required';
+    expect(sendValidationError({ message: 'hello' })).toBe(error);
+    expect(sendValidationError({ to: '', message: 'hello', mediaUrl: 'https://host/blob/1' })).toBe(error);
+});
+
+// ── caption shape ──
+test('captionOptions carries the caption when there is one', () => {
+    expect(captionOptions('itinerary attached')).toEqual({ caption: 'itinerary attached' });
+});
+
+test('captionOptions omits the caption entirely for caption-less files', () => {
+    expect(captionOptions('')).toEqual({});
+    expect(captionOptions(undefined)).toEqual({});
+    expect(captionOptions(null)).toEqual({});
 });
