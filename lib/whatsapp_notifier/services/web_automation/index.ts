@@ -32,7 +32,7 @@ import {
     mediaGetResponse,
     mediaDeleteResponse
 } from './media';
-import { sentMessageId } from './send';
+import { sentMessageId, sendValidationError, fetchMedia, captionOptions } from './send';
 
 const app = new Hono();
 const port = Number(process.env.PORT || 3001);
@@ -203,7 +203,7 @@ async function waitForClientReady(clientData: ClientData, timeoutMs = 30000): Pr
 
 // Resolves to the sent whatsapp-web.js Message so /send can hand the real
 // message id back to the host (the echo-dedupe key for two-way capture).
-async function sendMessageWithRetry(client: Client, clientData: ClientData, chatId: string, message: string, mediaUrl?: string | null) {
+async function sendMessageWithRetry(client: Client, clientData: ClientData, chatId: string, message?: string | null, mediaUrl?: string | null) {
     const maxAttempts = 5;
 
     // Wait for the internal WWeb store to be fully loaded before first attempt
@@ -213,11 +213,12 @@ async function sendMessageWithRetry(client: Client, clientData: ClientData, chat
         try {
             if (mediaUrl) {
                 const { MessageMedia } = require('whatsapp-web.js');
-                const media = await MessageMedia.fromUrl(mediaUrl);
-                return await client.sendMessage(chatId, media, { caption: message });
+                // unsafeMime + no-caption handling live in send.ts (unit-tested).
+                const media = await fetchMedia(MessageMedia, mediaUrl);
+                return await client.sendMessage(chatId, media, captionOptions(message));
             }
 
-            return await client.sendMessage(chatId, message);
+            return await client.sendMessage(chatId, message!);
         } catch (error) {
             console.error(`Send attempt ${attempt}/${maxAttempts} failed for chat ${chatId}:`, error);
 
@@ -529,8 +530,10 @@ app.post('/logout/:userId', async (c) => {
 app.post('/send/:userId', async (c) => {
     const userId = c.req.param('userId');
     const { to, message, mediaUrl } = await c.req.json();
-    if (!to || !message) {
-        return c.json({ success: false, error: 'Both `to` and `message` are required' }, 422);
+    // `to` + something deliverable (message and/or mediaUrl) — see send.ts.
+    const validationError = sendValidationError({ to, message, mediaUrl });
+    if (validationError) {
+        return c.json({ success: false, error: validationError }, 422);
     }
     // Never spawn a client just to fail the auth check below: a send for a
     // never-paired user (e.g. a job defaulting to user "default") would

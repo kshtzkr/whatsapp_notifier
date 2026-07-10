@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.8.1] - 2026-07-10
+
+Two production file-send fixes on the service's `POST /send` path.
+
+- **Accept file-only sends.** `/send` required a non-empty `message` and
+  422'd (`Both 'to' and 'message' are required`) any body with a `mediaUrl`
+  but no caption — the normal shape for hosts that attach files one-by-one
+  with the caption only on the first file. `to` is still always required;
+  the body must now carry `message` and/or `mediaUrl`. A caption-less media
+  send delivers the file with no caption (the caption key is omitted
+  entirely, matching a hand-sent file).
+- **`unsafeMime` media downloads.** `MessageMedia.fromUrl` sniffed the MIME
+  type from the URL, so extension-less media URLs (e.g. Rails ActiveStorage
+  blob/proxy paths) threw `Unable to determine MIME type using URL` and the
+  send 500'd. The send path now passes `unsafeMime: true`, trusting the
+  response `Content-Type` header instead — this is the service's only
+  `fromUrl` call site; inbound/history media use `downloadMedia()` and are
+  unaffected.
+- Note: `/send` accepts no `filename` field today, so recipient-side
+  document names come from whatever `fromUrl` derives. Plumbing an optional
+  host-provided `filename` is future work, not part of this patch.
+
 ## [0.8.0] - 2026-06-13
 
 Two-way capture: messages the operator sends from the WhatsApp app itself
