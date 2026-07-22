@@ -1,5 +1,20 @@
 # Changelog
 
+All notable changes to this project are documented here. The format is based on
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
+follows [Semantic Versioning](https://semver.org).
+
+## [Unreleased]
+
+### Documentation
+
+- Rewrote the README with a badge row, table of contents, requirements, an
+  explanation of the Ruby-to-Bun service boundary, and sections for the CLI,
+  doctor, engine routes, and inbound/media helpers.
+- Added `docs/CONFIGURATION.md` with the full configuration reference: every
+  Ruby option and every service environment variable, with types and defaults.
+- Added `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, and `SECURITY.md`.
+
 ## [0.8.2] - 2026-07-10
 
 Production fix: every operator-phone (fromMe) message in an @lid-keyed chat
