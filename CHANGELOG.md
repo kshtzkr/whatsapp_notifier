@@ -6,8 +6,57 @@ follows [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-30
+
+Two pieces of transport logic that every host was reimplementing now live in
+the gem. Both are additive — no existing call changes behaviour.
+
+### Added
+
+- **`WhatsAppNotifier.session_ready?`** — one call for "can this operator send
+  right now?". It is `connection_status(...)[:authenticated] == true` with
+  transport errors treated as not-ready: an unreachable status endpoint means
+  the service is down, so a send could not have succeeded either. Takes
+  `user_id:` (sugar for the metadata key) or a full `metadata:` hash.
+  `ConfigurationError` is deliberately NOT swallowed — that is a host setup
+  mistake, and answering `false` would quietly park every send behind a
+  "session down" backoff. Available on `Client` and on any provider, so custom
+  providers inherit it.
+- **Structured failure codes on `Result#error_code`.** Every send failure used
+  to collapse to `:delivery_exception`, which left hosts regexing
+  `error_message` to work out whether a retry was safe. Failures now classify
+  into a stable vocabulary: `:auth_required`, `:not_on_whatsapp`,
+  `:invalid_phone`, `:recipient_unresolved`, `:service_unreachable`,
+  `:timeout`, `:rate_limited`, and `:delivery_exception` as the catch-all.
+  `WhatsAppNotifier::ErrorCode::ALL` lists them.
+  - The split between `:service_unreachable` (connect never opened — the
+    message definitely did not go out) and `:timeout` (request sent, answer
+    never came — outcome unknown) is the one that matters: only the former is
+    safe to auto-retry without risking a double-message.
+- **`WhatsAppNotifier::ServiceError`** — raised in place of a bare `RuntimeError`
+  for a non-2xx service answer, carrying `#status`. Classification reads the
+  status instead of regexing our own message string.
+- The adapter now forwards an `errorCode` from the service when one is present,
+  so a future service release can name the failure itself and the gem stops
+  inferring it from text.
+
+### Compatibility
+
+- `error_message` is untouched, including the `"service request failed (401):
+  ..."` wording, so hosts still fingerprinting text keep working while they
+  migrate.
+- `:delivery_exception` remains the fallback code, so code keying on the
+  pre-0.9.0 value still matches every failure the gem cannot classify.
+- `ServiceError` subclasses `RuntimeError`, which is what a non-2xx raised
+  before, so hosts wrapping media fetches or status polls in
+  `rescue RuntimeError` keep catching it. That is why it does not hang off
+  `WhatsAppNotifier::Error`.
+
 ### Documentation
 
+- README: a `session_ready?` section under "Connecting a number" and a failure
+  code table, with a "did the message go out?" column, under "Sending a
+  message".
 - Rewrote the README with a badge row, table of contents, requirements, an
   explanation of the Ruby-to-Bun service boundary, and sections for the CLI,
   doctor, engine routes, and inbound/media helpers.

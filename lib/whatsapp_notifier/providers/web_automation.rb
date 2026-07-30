@@ -17,18 +17,21 @@ module WhatsAppNotifier
         response = adapter.send_message(payload: payload, session: session)
         persist_session(response.fetch(:session, {}), payload.fetch(:metadata, {}))
 
+        success = response.fetch(:success)
         Result.new(
-          success: response.fetch(:success),
+          success: success,
           provider: :web_automation,
           message_id: response[:message_id],
-          error_code: response[:error_code],
+          error_code: error_code_for(success, response),
           error_message: response[:error_message],
           wait_seconds: response[:wait_seconds],
           metadata: response.fetch(:metadata, {})
         )
       rescue StandardError => e
-        Result.new(success: false, provider: :web_automation, error_code: :delivery_exception, error_message: e.message)
+        Result.new(success: false, provider: :web_automation,
+                   error_code: ErrorCode.from_exception(e), error_message: e.message)
       end
+
 
       def scan_qr(metadata: {})
         raise ConfigurationError, "web automation provider is disabled" unless configuration.web_automation_enabled
@@ -126,6 +129,14 @@ module WhatsAppNotifier
 
 
       private
+
+      # A code the adapter supplied wins; otherwise classify from the error
+      # text, which is all a ≤ 0.8.x service gives us. Successes carry no code.
+      def error_code_for(success, response)
+        return nil if success
+
+        response[:error_code] || ErrorCode.from_message(response[:error_message])
+      end
 
       def session_for(metadata)
         user_id = metadata[:user_id]

@@ -162,6 +162,19 @@ The QR rotates every ~20 seconds, so re-fetch it while `has_qr` is true. Once a
 session authenticates it persists on the service, so later sends reconnect
 without a new scan.
 
+Before sending, `session_ready?` answers the only question a sender actually
+has. It is `connection_status` reduced to a boolean, with transport failures
+treated as not-ready — an unreachable status endpoint means the service is down,
+so the send could not have succeeded either:
+
+```ruby
+WhatsAppNotifier.session_ready?(user_id: current_user.id)
+# => true / false, never raises on a network error
+```
+
+A `ConfigurationError` still raises: that is a mistake in your setup, and
+answering `false` would quietly park every send behind a "session down" retry.
+
 The mounted engine exposes the same two steps as JSON endpoints
 (`GET /whatsapp/qr` and `GET /whatsapp/status`) if you prefer to build the
 pairing screen in your front end.
@@ -182,10 +195,32 @@ result = WhatsAppNotifier.deliver(
 | --- | --- |
 | `success?` / `failure?` | delivery outcome |
 | `message_id` | WhatsApp message id from the service (a local fallback id on older services) |
-| `error_code` | symbol such as `:delivery_exception` on failure |
+| `error_code` | machine-readable failure class on failure, `nil` on success |
 | `error_message` | human-readable failure reason |
 | `wait_seconds` | provider-requested backoff, honored by bulk delivery |
 | `metadata` | provider metadata hash |
+
+### Failure codes
+
+`error_code` is a stable symbol you can branch on. The important distinction is
+whether the message could already be on its way: retrying a send whose outcome
+is unknown may message someone twice.
+
+| Code | Meaning | Did the message go out? |
+| --- | --- | --- |
+| `:auth_required` | session logged out, or the service refused upfront | no |
+| `:not_on_whatsapp` | the number has no WhatsApp account | no |
+| `:invalid_phone` | the number is malformed | no |
+| `:recipient_unresolved` | the service could not resolve the recipient id (wedged session) | no |
+| `:service_unreachable` | the connection never opened | no |
+| `:timeout` | the request went out, the answer never came | **unknown** |
+| `:rate_limited` | the service throttled the send | **unknown** |
+| `:delivery_exception` | unclassified | **unknown** |
+
+`:delivery_exception` is the catch-all and the pre-0.9.0 value for every
+failure, so code that already keys on it keeps working. `error_message` is
+unchanged too — including the `"service request failed (401): ..."` wording —
+so a host can migrate off text fingerprints at its own pace.
 
 To attach a file, pass its URL as `metadata[:media_url]`:
 

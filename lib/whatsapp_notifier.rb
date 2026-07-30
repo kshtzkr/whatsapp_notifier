@@ -1,5 +1,6 @@
 require_relative "whatsapp_notifier/version"
 require_relative "whatsapp_notifier/errors"
+require_relative "whatsapp_notifier/error_code"
 require_relative "whatsapp_notifier/result"
 require_relative "whatsapp_notifier/configuration"
 require_relative "whatsapp_notifier/web_adapter"
@@ -60,6 +61,16 @@ module WhatsAppNotifier
 
     def connection_status(provider: nil, metadata: {})
       client.connection_status(provider: provider, metadata: metadata)
+    end
+
+    # One call for "can this operator send right now?" — an authenticated
+    # session answers true, everything else (including an unreachable status
+    # endpoint) answers false. `user_id:` is sugar for the metadata key every
+    # multi-user host passes; both forms work.
+    def session_ready?(user_id: nil, provider: nil, metadata: {})
+      meta = metadata.to_h
+      meta = meta.merge(user_id: user_id) unless user_id.nil?
+      client.session_ready?(provider: provider, metadata: meta)
     end
 
     def fetch_inbound(provider: nil, metadata: {})

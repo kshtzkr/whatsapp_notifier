@@ -67,6 +67,10 @@ module WhatsAppNotifier
         message_id: response["messageId"] || response["message_id"] ||
                     payload[:idempotency_key] || "local-#{Time.now.to_i}",
         session: session,
+        # A code the service supplied wins over anything the provider could
+        # infer from the message text. Absent on every service ≤ 0.8.x, which
+        # is why the provider still classifies as a fallback.
+        error_code: ErrorCode.normalize(response["errorCode"] || response["error_code"]),
         error_message: response["error"]
       }
     end
@@ -109,7 +113,7 @@ module WhatsAppNotifier
       user_id = user_id_from(metadata)
       res = binary_get("/media/#{user_id}/#{path_id(message_id)}")
       return nil if res.code.to_s == "404"
-      raise "service request failed (#{res.code}): #{res.body}" unless res.is_a?(Net::HTTPSuccess)
+      raise ServiceError.new("service request failed (#{res.code}): #{res.body}", status: res.code) unless res.is_a?(Net::HTTPSuccess)
 
       body = res.body.to_s
       {
@@ -283,7 +287,7 @@ module WhatsAppNotifier
       # carries no "success" key, so they degrade rather than raise.
       return parsed if allow_404 && res.code.to_s == "404"
 
-      raise "service request failed (#{res.code}): #{parsed["error"] || res.body}"
+      raise ServiceError.new("service request failed (#{res.code}): #{parsed["error"] || res.body}", status: res.code)
     end
 
     def parse_body(raw)
