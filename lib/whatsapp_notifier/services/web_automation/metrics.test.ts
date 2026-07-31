@@ -14,6 +14,7 @@ describe('newCounters', () => {
             init_failures_total: 0,
             ws_endpoint_timeouts_total: 0,
             init_timeouts_total: 0,
+            ready_timeouts_total: 0,
             auth_failures_total: 0,
             disconnects_total: 0,
         });
@@ -57,6 +58,7 @@ describe('renderMetrics', () => {
             init_failures_total: 4,
             ws_endpoint_timeouts_total: 2,
             init_timeouts_total: 1,
+            ready_timeouts_total: 6,
             auth_failures_total: 3,
             disconnects_total: 5,
         };
@@ -81,6 +83,7 @@ describe('renderMetrics', () => {
         expect(out).toContain('whatsapp_init_failures_total 4');
         expect(out).toContain('whatsapp_ws_endpoint_timeouts_total 2');
         expect(out).toContain('whatsapp_init_timeouts_total 1');
+        expect(out).toContain('whatsapp_ready_timeouts_total 6');
         expect(out).toContain('whatsapp_auth_failures_total 3');
         expect(out).toContain('whatsapp_disconnects_total 5');
         expect(out).toContain('whatsapp_service_uptime_seconds 86400');

@@ -8,6 +8,7 @@ import { InitGate } from './init_gate';
 import {
     hasPairedSession,
     InitRetryLimiter,
+    isReadyWedged,
     reapLimitMs,
     touchClient,
     shouldWipeSessionOnReap
@@ -43,6 +44,13 @@ const BROWSER_EXECUTABLE_PATH = process.env.PUPPETEER_EXECUTABLE_PATH;
 // WhatsApp Web update breaks the injected store), instead of wedging in
 // INITIALIZING forever with no QR.
 const INIT_TIMEOUT_MS = Number(process.env.WHATSAPP_INIT_TIMEOUT_MS || 90000);
+// Recycle a client that authenticates from the on-disk session but never fires
+// 'ready' (the store never hydrates — RAM pressure, a mid-write SIGKILL, a
+// slow web.whatsapp.com). Without this the client serves qr=null +
+// authenticated=false until the 30-min idle reaper — the "No QR available
+// forever after a deploy" outage. 3 minutes is comfortably above a slow but
+// healthy hydration (~30s observed) and well under the reaper.
+const READY_TIMEOUT_MS = Number(process.env.WHATSAPP_READY_TIMEOUT_MS || 180000);
 // Optionally pin the WhatsApp Web build so a live web.whatsapp.com change can't
 // silently break the client. Set WWEBJS_WEB_VERSION to a known-good version
 // (e.g. "2.3000.1023204887"); leave unset to use the library default.
@@ -63,6 +71,7 @@ interface ClientData {
     // pairing visit whose LocalAuth dir holds no credentials at all.
     everAuthenticated?: boolean;
     initTimer?: ReturnType<typeof setTimeout>;
+    readyTimer?: ReturnType<typeof setTimeout>;
     releaseInitSlot?: () => void;
 }
 
@@ -98,6 +107,27 @@ async function pushWebhook(userId: string, msg: InboundMsg) {
         });
     } catch (e) {
         console.error(`Webhook push failed for ${userId}`, e);
+    }
+}
+
+// Session lifecycle push (0.9.1): tell the host the moment a session becomes
+// sendable, so work it parked on "session down" resumes in realtime instead
+// of on its next polling tick. Same URL + token as the message webhook; the
+// payload carries `event` instead of `message`, which pre-0.9.1 hosts reject
+// with a 400 — harmless, and the host's poll-based resume still covers them.
+async function pushSessionEvent(userId: string, event: 'session_ready') {
+    if (!WEBHOOK_URL) return;
+    try {
+        await fetch(WEBHOOK_URL, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                ...(WEBHOOK_TOKEN ? { 'X-WA-Token': WEBHOOK_TOKEN } : {})
+            },
+            body: JSON.stringify({ userId, event })
+        });
+    } catch (e) {
+        console.error(`Session event push failed for ${userId}`, e);
     }
 }
 
@@ -139,6 +169,13 @@ const initGate = new InitGate(Number(process.env.WHATSAPP_MAX_CONCURRENT_INITS |
 // loops. Raise both (env-overridable).
 const BROWSER_LAUNCH_TIMEOUT_MS = Number(process.env.WHATSAPP_BROWSER_TIMEOUT_MS || 60000);
 const PROTOCOL_TIMEOUT_MS = Number(process.env.WHATSAPP_PROTOCOL_TIMEOUT_MS || 120000);
+
+function clearReadyTimer(clientData: ClientData) {
+    if (clientData.readyTimer) {
+        clearTimeout(clientData.readyTimer);
+        clientData.readyTimer = undefined;
+    }
+}
 
 function clearInitTimer(clientData: ClientData) {
     if (clientData.initTimer) {
@@ -290,6 +327,7 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
     client.on('qr', async (qr) => {
         clientData.state = 'QR_REQUIRED';
         clearInitTimer(clientData); // progress made — QR is showable
+        clearReadyTimer(clientData); // WhatsApp wants a re-scan — a QR IS showing, not a wedge
         try {
             clientData.qr = await toDataURL(qr);
             console.log(`QR RECEIVED and converted for User ${userId}`);
@@ -303,8 +341,12 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
         clientData.qr = null;
         clientData.ready = true;
         clearInitTimer(clientData);
+        clearReadyTimer(clientData);
         initRetries.reset(userId);
         console.log(`Client is READY for User ${userId}`);
+        // Wake the host NOW — a campaign parked on "session down" should not
+        // wait out a polling interval when the session just came back.
+        pushSessionEvent(userId, 'session_ready').catch(console.error);
         // Replay anything that arrived while we were disconnected.
         backfillInbound(userId, client).catch((e) => console.error(`Backfill failed for ${userId}`, e));
     });
@@ -324,12 +366,28 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
         clientData.everAuthenticated = true;
         clearInitTimer(clientData);
         console.log(`AUTHENTICATED for User ${userId}`);
+
+        // Ready watchdog: 'authenticated' just cleared the INITIALIZING
+        // watchdog, so from here nothing guards the authenticated→ready hop.
+        // If the store never hydrates, recycle — the session dir survives
+        // (everAuthenticated), so the next /status poll relaunches Chromium
+        // and reconnects without a new QR. Re-armed on every 'authenticated',
+        // so a client that re-auths after a hiccup gets a fresh window.
+        clearReadyTimer(clientData);
+        clientData.readyTimer = setTimeout(() => {
+            if (isReadyWedged(clientData)) {
+                counters.ready_timeouts_total += 1;
+                console.error(`User ${userId} AUTHENTICATED but not ready > ${READY_TIMEOUT_MS}ms — recycling (session kept)`);
+                destroyClient(userId).catch(console.error);
+            }
+        }, READY_TIMEOUT_MS);
     });
 
     client.on('auth_failure', (msg) => {
         clientData.state = 'DISCONNECTED';
         clientData.ready = false;
         clearInitTimer(clientData);
+        clearReadyTimer(clientData);
         counters.auth_failures_total += 1;
         console.error(`AUTHENTICATION FAILURE for User ${userId}`, msg);
     });
@@ -409,6 +467,7 @@ async function destroyClient(userId: string, clearSession: boolean = false) {
     if (data && !data.isDestroying) {
         data.isDestroying = true;
         clearInitTimer(data);
+        clearReadyTimer(data);
         console.log(`Destroying WhatsApp client for User: ${userId} (clearSession: ${clearSession})`);
         try {
             // Unregister listeners to prevent loops or double-destroys

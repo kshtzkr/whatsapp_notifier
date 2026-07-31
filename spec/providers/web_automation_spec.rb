@@ -69,6 +69,68 @@ RSpec.describe WhatsAppNotifier::Providers::WebAutomation do
     end
   end
 
+  # Error codes are what hosts branch on to decide whether a retry could
+  # double-message someone, so a raised exception must survive as a code and
+  # not only as text.
+  it "classifies the raised exception into an error code" do
+    Dir.mktmpdir do |dir|
+      adapter = double
+      allow(adapter).to receive(:send_message)
+        .and_raise(WhatsAppNotifier::ServiceError.new("service request failed (401): User not authenticated", status: 401))
+      allow(adapter).to receive(:fetch_qr_code).and_return("qr")
+      allow(adapter).to receive(:connection_status).and_return({})
+      config = build_config(path: File.join(dir, "session.json"), adapter: adapter)
+      provider = described_class.new(configuration: config)
+
+      result = provider.deliver(to: "+1", body: "h")
+
+      expect(result.error_code).to eq(:auth_required)
+      # The message field is untouched — hosts still fingerprinting it work.
+      expect(result.error_message).to eq("service request failed (401): User not authenticated")
+    end
+  end
+
+  it "classifies a failure the adapter reported without raising" do
+    Dir.mktmpdir do |dir|
+      adapter = double
+      allow(adapter).to receive(:send_message)
+        .and_return(success: false, session: {}, error_message: "No LID for 919999000001")
+      allow(adapter).to receive(:fetch_qr_code).and_return("qr")
+      allow(adapter).to receive(:connection_status).and_return({})
+      config = build_config(path: File.join(dir, "session.json"), adapter: adapter)
+      provider = described_class.new(configuration: config)
+
+      expect(provider.deliver(to: "+1", body: "h").error_code).to eq(:recipient_unresolved)
+    end
+  end
+
+  it "keeps a code the adapter supplied instead of re-guessing from the text" do
+    Dir.mktmpdir do |dir|
+      adapter = double
+      allow(adapter).to receive(:send_message)
+        .and_return(success: false, session: {}, error_code: :not_on_whatsapp, error_message: "No LID for 919999000001")
+      allow(adapter).to receive(:fetch_qr_code).and_return("qr")
+      allow(adapter).to receive(:connection_status).and_return({})
+      config = build_config(path: File.join(dir, "session.json"), adapter: adapter)
+      provider = described_class.new(configuration: config)
+
+      expect(provider.deliver(to: "+1", body: "h").error_code).to eq(:not_on_whatsapp)
+    end
+  end
+
+  it "leaves a successful send without an error code" do
+    Dir.mktmpdir do |dir|
+      adapter = double
+      allow(adapter).to receive(:send_message).and_return(success: true, message_id: "w1", session: {})
+      allow(adapter).to receive(:fetch_qr_code).and_return("qr")
+      allow(adapter).to receive(:connection_status).and_return({})
+      config = build_config(path: File.join(dir, "session.json"), adapter: adapter)
+      provider = described_class.new(configuration: config)
+
+      expect(provider.deliver(to: "+1", body: "h").error_code).to be_nil
+    end
+  end
+
   it "raises for missing adapter methods in scan" do
     Dir.mktmpdir do |dir|
       adapter = Object.new

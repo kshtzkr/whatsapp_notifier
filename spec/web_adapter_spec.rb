@@ -104,6 +104,41 @@ RSpec.describe WhatsAppNotifier::WebAdapter do
     end.to raise_error(/service request failed/)
   end
 
+  # The status is what ErrorCode classifies on — re-deriving it from the
+  # message text would be a regex round-trip through our own string.
+  it "carries the HTTP status on the raised service error" do
+    allow(Net::HTTP).to receive(:start)
+      .and_return(http_failure(code: "401", body: JSON.generate({ error: "User not authenticated" })))
+
+    expect { adapter.send_message(payload: { to: "+1", body: "hi" }, session: {}) }
+      .to raise_error(WhatsAppNotifier::ServiceError) { |error|
+        expect(error.status.to_i).to eq(401)
+        # Pre-0.9.0 this was a bare RuntimeError; hosts rescue that class by
+        # name around media fetches and status polls.
+        expect(error).to be_a(RuntimeError)
+        # Wording unchanged from 0.8.x — hosts that fingerprinted it still match.
+        expect(error.message).to eq("service request failed (401): User not authenticated")
+      }
+  end
+
+  # Forward compatibility: a future service can name the failure itself and
+  # the gem stops guessing from text.
+  it "normalizes an error code the service supplied" do
+    response = http_success(body: { "success" => false, "errorCode" => "NUMBER_NOT_REGISTERED", "error" => "boom" })
+    allow(Net::HTTP).to receive(:start).and_return(response)
+
+    result = adapter.send_message(payload: { to: "+1", body: "hi" }, session: {})
+
+    expect(result).to include(success: false, error_code: :not_on_whatsapp, error_message: "boom")
+  end
+
+  it "leaves error_code nil when the service does not send one" do
+    response = http_success(body: { "success" => false, "error" => "boom" })
+    allow(Net::HTTP).to receive(:start).and_return(response)
+
+    expect(adapter.send_message(payload: { to: "+1", body: "hi" }, session: {})[:error_code]).to be_nil
+  end
+
   it "handles empty and invalid response bodies gracefully" do
     empty_body = instance_double(Net::HTTPOK, body: "", code: "200", is_a?: true)
     invalid_body = instance_double(Net::HTTPInternalServerError, body: "raw-error", code: "500", is_a?: false)

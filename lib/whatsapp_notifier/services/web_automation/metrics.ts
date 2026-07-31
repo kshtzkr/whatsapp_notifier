@@ -19,6 +19,7 @@ export interface Counters {
     init_failures_total: number;        // client.initialize() rejected
     ws_endpoint_timeouts_total: number; // Chromium never produced a WS endpoint (crash-loop signature)
     init_timeouts_total: number;        // watchdog recycled a stuck-INITIALIZING client
+    ready_timeouts_total: number;       // watchdog recycled an AUTHENTICATED-but-never-ready wedge
     auth_failures_total: number;        // auth_failure event
     disconnects_total: number;          // disconnected event
 }
@@ -28,6 +29,7 @@ export function newCounters(): Counters {
         init_failures_total: 0,
         ws_endpoint_timeouts_total: 0,
         init_timeouts_total: 0,
+        ready_timeouts_total: 0,
         auth_failures_total: 0,
         disconnects_total: 0,
     };
@@ -103,6 +105,7 @@ export function renderMetrics(
         ...counter('whatsapp_init_failures_total', 'client.initialize() rejections.', counters.init_failures_total),
         ...counter('whatsapp_ws_endpoint_timeouts_total', 'Chromium launches that never produced a WS endpoint (crash-loop signature).', counters.ws_endpoint_timeouts_total),
         ...counter('whatsapp_init_timeouts_total', 'Clients recycled by the INITIALIZING watchdog.', counters.init_timeouts_total),
+        ...counter('whatsapp_ready_timeouts_total', 'Clients recycled by the ready watchdog (AUTHENTICATED but never ready).', counters.ready_timeouts_total),
         ...counter('whatsapp_auth_failures_total', 'auth_failure events.', counters.auth_failures_total),
         ...counter('whatsapp_disconnects_total', 'disconnected events.', counters.disconnects_total),
         ...gauge('whatsapp_service_uptime_seconds', 'Seconds since the service process started.', uptimeSeconds),
