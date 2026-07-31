@@ -6,6 +6,30 @@ follows [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-07-31
+
+Closes the last unwatched gap in the session lifecycle, and tells the host the
+moment a session comes back. Service-side (TypeScript) only — no Ruby API
+changes.
+
+### Added
+
+- **Ready watchdog.** The INITIALIZING watchdog stands down when
+  `authenticated` fires, so a session that re-authenticated from disk but
+  whose WhatsApp Web store never hydrated (`ready` never fires — RAM pressure,
+  a mid-write kill, a slow web.whatsapp.com) wedged serving `qr=null` +
+  `authenticated=false` until the 30-minute idle reaper. The service now
+  recycles such a client after `WHATSAPP_READY_TIMEOUT_MS` (default 180000);
+  the on-disk session survives, so the next status poll reconnects without a
+  new QR. Recycles are counted in the new `whatsapp_ready_timeouts_total`
+  metric.
+- **`session_ready` webhook event.** When a client reaches `ready`, the
+  service POSTs `{userId, event: "session_ready"}` to the configured
+  `WHATSAPP_WEBHOOK_URL` (same `X-WA-Token` auth as message pushes), so hosts
+  can resume work they parked on "session down" in realtime instead of on a
+  polling tick. Best-effort: hosts that don't know the shape reject it with a
+  400 and lose nothing.
+
 ## [0.9.0] - 2026-07-30
 
 Two pieces of transport logic that every host was reimplementing now live in

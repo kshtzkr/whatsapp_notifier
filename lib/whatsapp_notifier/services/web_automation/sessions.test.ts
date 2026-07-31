@@ -5,6 +5,7 @@ import { join } from 'path';
 import {
     hasPairedSession,
     InitRetryLimiter,
+    isReadyWedged,
     reapLimitMs,
     touchClient,
     shouldWipeSessionOnReap
@@ -125,5 +126,26 @@ describe('InitRetryLimiter', () => {
         expect(limiter.shouldRetry('b')).toBe(true);
         expect(limiter.shouldRetry('a')).toBe(false);
         expect(limiter.shouldRetry('b')).toBe(false);
+    });
+});
+
+describe('isReadyWedged', () => {
+    test('AUTHENTICATED but never ready is the wedge', () => {
+        expect(isReadyWedged({ state: 'AUTHENTICATED', ready: false })).toBe(true);
+        expect(isReadyWedged({ state: 'AUTHENTICATED' })).toBe(true); // ready never set
+    });
+
+    test('a ready client is the normal path, not a wedge', () => {
+        expect(isReadyWedged({ state: 'AUTHENTICATED', ready: true })).toBe(false);
+    });
+
+    test('a client already being destroyed must not be recycled again', () => {
+        expect(isReadyWedged({ state: 'AUTHENTICATED', ready: false, isDestroying: true })).toBe(false);
+    });
+
+    test('other states are owned by their own paths', () => {
+        expect(isReadyWedged({ state: 'QR_REQUIRED', ready: false })).toBe(false);   // QR is showing
+        expect(isReadyWedged({ state: 'DISCONNECTED', ready: false })).toBe(false);  // disconnect path
+        expect(isReadyWedged({ state: 'INITIALIZING', ready: false })).toBe(false);  // init watchdog owns it
     });
 });

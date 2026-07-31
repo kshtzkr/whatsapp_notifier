@@ -89,3 +89,22 @@ export class InitRetryLimiter {
         this.counts.delete(userId);
     }
 }
+
+// The AUTHENTICATED-but-never-ready wedge (incident 2026-06-05, again
+// 2026-07-31): after a service restart a session re-authenticates from disk,
+// but Chromium never finishes loading the WhatsApp Web store, so `ready`
+// never fires. The client then serves qr=null + authenticated=false forever —
+// the broadcast modal shows "No QR available" and sends 503. The INITIALIZING
+// watchdog can't see it (state already moved on), and the idle reaper takes
+// 30+ minutes. This predicate names the wedge for the ready watchdog that
+// index.ts arms when 'authenticated' fires.
+//
+// NOT wedged: already ready (the normal path), already being destroyed
+// (recycling twice double-frees nothing but spams logs), or moved to another
+// state — QR_REQUIRED means WhatsApp wants a re-scan and IS showing a QR, and
+// DISCONNECTED clients are on the disconnect path already.
+export function isReadyWedged(
+    client: { state: string; ready?: boolean; isDestroying?: boolean }
+): boolean {
+    return client.state === 'AUTHENTICATED' && !client.ready && !client.isDestroying;
+}
