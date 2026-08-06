@@ -6,6 +6,29 @@ follows [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-08-06
+
+Targets the fresh-pairing logout loop: a phone scans the QR and shows the
+device as linked, but WhatsApp terminates the new session seconds after
+`ready`, the client recycles, and the operator is bounced back to a QR
+screen indefinitely. Service-side (TypeScript) only — no Ruby API changes.
+
+### Changed
+
+- **whatsapp-web.js 1.34.6 → 1.34.7.** Picks up the store-injection rework
+  (moduleraid removed), the LID-handling fixes in `getContact` /
+  `getChatModel`, and the `disconnected`-event fixes — the release most
+  relevant to fresh sessions being force-logged-out right after pairing
+  while older, already-paired sessions keep working.
+
+### Fixed
+
+- **Stale QR served after scan.** The `authenticated` event now clears the
+  stored QR. Previously the consumed (already-scanned, no-longer-valid) code
+  kept being served through the authenticated→ready sync window, so host
+  pairing modals kept telling the operator to scan an image that could
+  never work again.
+
 ## [0.9.1] - 2026-07-31
 
 Closes the last unwatched gap in the session lifecycle, and tells the host the
