@@ -362,6 +362,11 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
 
     client.on('authenticated', () => {
         clientData.state = 'AUTHENTICATED';
+        // The QR that got us here is consumed — WhatsApp invalidates it on
+        // scan. Serving it through the authenticated→ready sync window keeps
+        // the host's pairing modal saying "scan this QR" at a code that can
+        // never work again; null makes the host show its waiting state instead.
+        clientData.qr = null;
         clientData.ready = false;
         clientData.everAuthenticated = true;
         clearInitTimer(clientData);
