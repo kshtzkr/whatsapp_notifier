@@ -91,7 +91,7 @@ RSpec.describe WhatsAppNotifier::Client do
     end
   end
 
-  it "delegates list_chats and fetch_history to the provider" do
+  it "delegates list_chats, fetch_history and resolve_lid to the provider" do
     Dir.mktmpdir do |dir|
       config.provider = :web_automation
       config.web_automation_enabled = true
@@ -101,7 +101,8 @@ RSpec.describe WhatsAppNotifier::Client do
         fetch_qr_code: "qr",
         connection_status: { state: "AUTHENTICATED", authenticated: true },
         list_chats: [{ id: "919@c.us", name: "Asha", last_message_at: 9 }],
-        fetch_history: [{ from: "919@c.us", body: "old", message_id: "h1" }]
+        fetch_history: [{ from: "919@c.us", body: "old", message_id: "h1" }],
+        resolve_lid: "919882536803"
       )
       config.web_adapter = adapter
       client = described_class.new(configuration: config)
@@ -110,6 +111,8 @@ RSpec.describe WhatsAppNotifier::Client do
         .to eq([{ id: "919@c.us", name: "Asha", last_message_at: 9 }])
       expect(client.fetch_history(chat_id: "919@c.us", provider: :web_automation, metadata: { user_id: 1 }))
         .to eq([{ from: "919@c.us", body: "old", message_id: "h1" }])
+      expect(client.resolve_lid(lid: "125417440686124@lid", provider: :web_automation, metadata: { user_id: 1 }))
+        .to eq("919882536803")
       # The default page size survives the delegation chain untouched.
       expect(adapter).to have_received(:fetch_history).with(chat_id: "919@c.us", limit: 50, metadata: { user_id: 1 })
     end

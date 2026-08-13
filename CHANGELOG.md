@@ -6,6 +6,58 @@ follows [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-08-13
+
+Stops the service inventing phone numbers for privacy-id (`@lid`) chats. Seen
+live in production: CMS inbox rows titled `128539848396…` — an id that belongs
+to no customer, cannot be dialled, and quietly forked a second thread for a
+customer who already had one.
+
+### Fixed
+
+- **The inbound leg no longer mints a phone out of an `@lid`'s own digits.**
+  For an `@lid` sender the contact object reports `id.user` as the privacy id
+  itself, and the inbound leg trusted it unconditionally — forwarding
+  `<lid>@c.us` as though it were a phone number. The operator-sent (fromMe) leg
+  has carried the guard since 0.8.x ("an @lid contact id would otherwise mint a
+  bogus 'phone' out of the privacy id's own digits"); only the inbound leg was
+  missing it, so every privacy-keyed chat that arrived customer-first was
+  threaded onto a fabricated number.
+- **History replay resolves the customer's leg too.** `replayHistory` resolved
+  only `fromMe` items, so the customer's own messages in an `@lid`-keyed chat
+  were replayed carrying the raw privacy id at `from` — the same defect by a
+  second route. Both legs now resolve, or the item is skipped.
+- **A poisoned alias can no longer be stored, or survive a restart.**
+  `rememberLidAlias` refuses any mapping that is not a `@c.us` id with digits
+  different from the `@lid`'s own, and `loadLidAliases` drops such entries when
+  reading `lid_aliases.json` — so a service already poisoned in production
+  recovers by itself instead of routing the operator's replies into a phantom
+  thread forever. The purge reaches disk on the next alias write.
+
+### Changed
+
+- **One `@lid` → phone resolver, shared by all three call sites.** The inbound
+  leg, the fromMe leg and history replay had grown separate copies that
+  drifted; `resolveLidToPhone` replaces them. It tries the learned alias map,
+  then the contact the caller already fetched, then one live lookup, and every
+  candidate must pass the same `isUsablePhoneFor` invariant.
+- **Live lookup now uses `getContactLidAndPhone`** (whatsapp-web.js 1.34.7's
+  purpose-built LID↔PN resolver), falling back to `getContactById`. This
+  recovers a phone even when the contact object carries nothing but the LID —
+  the case that previously ended in a fabricated number.
+
+### Added
+
+- **`senderLid` on the inbound wire.** Present only for a privacy-keyed chat,
+  carrying the `<digits>@lid` the counterparty was resolved FROM. Additive:
+  older hosts ignore the key. Mapped to `sender_lid` by the Ruby adapter.
+- **`GET /contacts/lid/:userId?lid=…` → `{ pn }`**, plus
+  `WhatsAppNotifier.resolve_lid(lid:)`. Resolves one privacy id to the phone
+  behind it so a host can repair conversations it already keyed on an
+  unresolved `@lid`. Same `X-WA-Token` + paired-and-ready gate as `/chats` and
+  `/history`. A privacy id with no recoverable phone answers 200 with
+  `pn: null` — a real answer, not a 404.
+
 ## [0.9.2] - 2026-08-06
 
 Targets the fresh-pairing logout loop: a phone scans the QR and shows the

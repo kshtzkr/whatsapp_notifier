@@ -118,6 +118,16 @@ module WhatsAppNotifier
         adapter.fetch_history(chat_id: chat_id, limit: limit, metadata: metadata)
       end
 
+      # Privacy-id resolution (v0.9.3) — same optional-capability guard.
+      def resolve_lid(lid:, metadata: {})
+        raise ConfigurationError, "web automation provider is disabled" unless configuration.web_automation_enabled
+
+        adapter = configuration.web_adapter
+        raise ConfigurationError, "web_adapter does not support @lid resolution (upgrade to a resolve_lid-capable adapter)" unless adapter.respond_to?(:resolve_lid)
+
+        adapter.resolve_lid(lid: lid, metadata: metadata)
+      end
+
       def logout(metadata: {})
         raise ConfigurationError, "web automation provider is disabled" unless configuration.web_automation_enabled
 

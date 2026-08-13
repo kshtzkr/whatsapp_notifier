@@ -97,6 +97,10 @@ module WhatsAppNotifier
       client.fetch_history(chat_id: chat_id, limit: limit, provider: provider, metadata: metadata)
     end
 
+    def resolve_lid(lid:, provider: nil, metadata: {})
+      client.resolve_lid(lid: lid, provider: provider, metadata: metadata)
+    end
+
     def logout(provider: nil, metadata: {})
       client.logout(provider: provider, metadata: metadata)
     end

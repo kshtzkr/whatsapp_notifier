@@ -37,6 +37,11 @@ export interface InboundMsg {
     // on. Inbound payloads keep the exact pre-0.8.0 shape.
     fromMe?: boolean;
     to?: string;
+    // 0.9.3. Present ONLY when the chat was keyed by a privacy id, carrying the
+    // raw `<digits>@lid` the phone/counterparty above was resolved FROM. Hosts
+    // that don't know the key ignore it; ours uses it to tell a resolved LID
+    // chat apart from an ordinary phone chat when auditing a thread's origin.
+    senderLid?: string;
 }
 
 // Media verdict merged into the payload by captureInbound — structurally
@@ -88,7 +93,13 @@ export function loadLidAliases(userId: string): Map<string, string> {
             const obj = JSON.parse(readFileSync(p, 'utf8'));
             if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
                 for (const [lid, phone] of Object.entries(obj)) {
-                    if (typeof phone === 'string') map.set(lid, phone);
+                    // Self-referential entries written by earlier versions
+                    // (<lid> → <lid>@c.us) are dropped on the way in, so a
+                    // service that has already been poisoned recovers on its
+                    // next start instead of needing the file edited by hand.
+                    // The purge reaches disk on the next rememberLidAlias
+                    // write, which persists the whole map.
+                    if (typeof phone === 'string' && isUsablePhoneFor(lid, phone)) map.set(lid, phone);
                 }
             }
         }
@@ -117,6 +128,29 @@ export function loadTargets(userId: string): Set<string> {
     return set;
 }
 
+// The digits of a jid's user part, for comparing a privacy id against a
+// candidate phone number.
+export function jidDigits(jid: string): string {
+    return String(jid || '').split('@')[0].replace(/\D/g, '');
+}
+
+// THE invariant of the whole @lid layer: a resolution is only usable when it
+// is a phone chat id AND its digits are not simply the privacy id's own digits
+// wearing a @c.us suffix.
+//
+// A @lid contact frequently reports `contact.id.user` (and sometimes
+// `contact.number`) as the LID itself. Accepting that mints a phone number
+// that has never existed: the host opens a thread keyed on it, no customer
+// record can ever match, the operator sees an unreadable row of digits, and
+// the alias map learns <lid> → <lid>@c.us — permanently routing the operator's
+// own replies into that phantom thread. Every resolution path funnels through
+// this check, so the class cannot come back one caller at a time.
+export function isUsablePhoneFor(lid: string, resolved: string): boolean {
+    if (!resolved || !resolved.endsWith('@c.us')) return false;
+    const digits = jidDigits(resolved);
+    return digits.length > 0 && digits !== jidDigits(lid);
+}
+
 // After an @lid is resolved to a phone @c.us, two things are remembered:
 //
 // 1. The @lid → phone mapping itself (persisted, see lidAliases): the fromMe
@@ -129,8 +163,13 @@ export function loadTargets(userId: string): Set<string> {
 //    re-open that chat, permanently losing any disconnect-window replies.
 //    Duplicate captures across the @c.us/@lid pair are fine: the contract is
 //    at-least-once and the host dedupes on messageId.
+//
+// A resolution that fails isUsablePhoneFor is never stored: a poisoned alias
+// outlives the process (it is persisted) and would keep re-infecting every
+// later message in the chat.
 export function rememberLidAlias(userId: string, rawFrom: string, resolvedFrom: string) {
     if (!rawFrom.endsWith('@lid')) return;
+    if (!isUsablePhoneFor(rawFrom, resolvedFrom)) return;
     const aliases = loadLidAliases(userId);
     if (aliases.get(rawFrom) !== resolvedFrom) {
         aliases.set(rawFrom, resolvedFrom);
@@ -304,17 +343,21 @@ export async function processInbound(userId: string, msg: any, deps: CaptureDeps
 
     // Resolve the sender BEFORE downloading media. Newer WhatsApp delivers
     // the reply's `from` as an @lid privacy id with no phone number, which
-    // the host can't match; if the contact can't supply the real phone the
-    // message is dropped — and a dropped message must not have cost a
-    // download that leaves up to 25MB of unreferenced bytes on disk.
+    // the host can't match; if no phone can be recovered the message is
+    // dropped — and a dropped message must not have cost a download that
+    // leaves up to 25MB of unreferenced bytes on disk.
     const rawFrom: string = msg.from || '';
     let from = rawFrom;
     if (rawFrom.endsWith('@lid')) {
-        const num = contact && (contact.number || (contact.id && contact.id.user));
-        if (num) from = `${String(num).replace(/\D/g, '')}@c.us`;
-        // Still an @lid => no phone to match or scope by. Drop it rather than
-        // forward an unmatchable, unpurgeable plaintext body.
-        if (from.endsWith('@lid')) return;
+        const resolved = await resolveLidToPhone(userId, rawFrom, msg.client, contact);
+        // No phone behind the privacy id => nothing to match or scope by.
+        // Drop it rather than forward an unmatchable counterparty — or, worse,
+        // the privacy id's own digits dressed up as a phone number.
+        if (!resolved) {
+            console.log(`Dropping inbound message from unresolved @lid chat for ${userId}`);
+            return;
+        }
+        from = resolved;
     }
 
     // Only a kept message earns the download. Every resolver failure mode
@@ -332,7 +375,10 @@ export async function processInbound(userId: string, msg: any, deps: CaptureDeps
     if (rawFrom.endsWith('@lid')) {
         // Known recipient replying from a privacy-number chat: allowlist the
         // @lid chat id too, so the reconnect backfill can re-open this chat.
+        // (resolveLidToPhone already learned the alias; this is the allowlist
+        // half, and re-learning an identical mapping is a no-op.)
         rememberLidAlias(userId, rawFrom, from);
+        inbound.senderLid = rawFrom;
     }
 
     enqueueInbound(userId, inbound);
@@ -359,15 +405,16 @@ async function processOwnMessage(userId: string, msg: any, deps: CaptureDeps) {
     // operator-phone message in such a chat used to hit an unconditional
     // drop while the customer's side flowed — half the conversation lost.
     // Resolve it instead, BEFORE any media download (a dropped message must
-    // not have cost one): the alias map the inbound leg learns first, then
-    // one guarded live lookup. Only when both fail is the message dropped —
-    // now the rare case, not every @lid-keyed chat.
+    // not have cost one), through the same resolver the inbound leg uses.
+    // Only when every path fails is the message dropped — the rare case, not
+    // every @lid-keyed chat.
     if (rawTo.endsWith('@lid')) {
-        to = resolveLidAlias(userId, rawTo) || await resolveOwnLidCounterparty(userId, rawTo, msg) || '';
-        if (!to) {
+        const resolved = await resolveLidToPhone(userId, rawTo, msg.client);
+        if (!resolved) {
             console.log(`Dropping fromMe message to unresolved @lid chat for ${userId}`);
             return;
         }
+        to = resolved;
     }
 
     // Same kept-message-earns-the-download rule as inbound: every resolver
@@ -391,37 +438,101 @@ async function processOwnMessage(userId: string, msg: any, deps: CaptureDeps) {
     // chat the alias call ALSO allowlists the @lid id itself — the id the
     // chat is actually reachable by (see rememberLidAlias).
     rememberTarget(userId, to);
-    if (rawTo.endsWith('@lid')) rememberLidAlias(userId, rawTo, to);
+    if (rawTo.endsWith('@lid')) {
+        rememberLidAlias(userId, rawTo, to);
+        inbound.senderLid = rawTo;
+    }
 
     enqueueInbound(userId, inbound);
     if (deps.push) deps.push(userId, inbound);
 }
 
-// Live fallback for a fromMe @lid counterparty with no learned alias yet
-// (e.g. right after a restart, before the customer writes again). Every wwebjs
-// Message carries its Client, and client.getContactById(<@lid>) is the exact
-// call the inbound leg's msg.getContact() makes for @lid senders — the one
-// path proven to yield the real phone in production. One roundtrip, guarded;
-// a hit is fed into rememberLidAlias so the next fromMe message resolves from
-// the map. contact.id.user is trusted only when the contact id itself is
-// phone-keyed — an @lid contact id would otherwise mint a bogus "phone" out
-// of the privacy id's own digits.
-async function resolveOwnLidCounterparty(userId: string, rawTo: string, msg: any): Promise<string | null> {
-    try {
-        const client = msg.client;
-        if (!client || typeof client.getContactById !== 'function') return null;
-        const contact = await client.getContactById(rawTo);
-        const num = contact && (contact.number ||
-            (contact.id && String(contact.id._serialized || '').endsWith('@c.us') && contact.id.user));
-        const digits = num ? String(num).replace(/\D/g, '') : '';
-        if (!digits) return null;
-        const resolved = `${digits}@c.us`;
-        rememberLidAlias(userId, rawTo, resolved);
-        return resolved;
-    } catch (e) {
-        console.error(`fromMe @lid contact lookup failed for ${userId}`, e);
-        return null;
+// A contact's phone chat id, or null. contact.number is the contact's own
+// phone; contact.id.user is trusted ONLY when the contact id is itself
+// phone-keyed, because for an @lid contact that field IS the privacy id.
+// Both answers still face isUsablePhoneFor at the call site.
+function phoneFromContact(contact: any): string | null {
+    if (!contact) return null;
+    const serialized = String((contact.id && contact.id._serialized) || '');
+    const num = contact.number ||
+        (serialized.endsWith('@c.us') && contact.id && contact.id.user);
+    const digits = num ? String(num).replace(/\D/g, '') : '';
+    return digits ? `${digits}@c.us` : null;
+}
+
+// One live lookup of the phone behind a privacy id, newest API first:
+//
+//   getContactLidAndPhone  — whatsapp-web.js 1.34.7's purpose-built LID↔PN
+//                            resolver (WWebJS.enforceLidAndPnRetrieval). This
+//                            is the authoritative answer and the reason a
+//                            phone can now be recovered even when the contact
+//                            object carries nothing but the LID.
+//   getContactById         — the older path, kept as the fallback for a client
+//                            that predates the API or returns no mapping.
+//
+// Every failure is swallowed: a lookup that cannot answer must degrade to
+// "unresolved" (the message is then dropped), never throw into the pipeline.
+async function lookupPhoneForLid(client: any, lid: string): Promise<string | null> {
+    if (!client) return null;
+
+    if (typeof client.getContactLidAndPhone === 'function') {
+        try {
+            const rows = await client.getContactLidAndPhone([ lid ]);
+            const pn = Array.isArray(rows) && rows[0] && rows[0].pn;
+            const digits = jidDigits(String(pn || ''));
+            if (digits) return `${digits}@c.us`;
+        } catch (e) {
+            console.error(`getContactLidAndPhone failed for ${lid}`, e);
+        }
     }
+
+    if (typeof client.getContactById === 'function') {
+        try {
+            return phoneFromContact(await client.getContactById(lid));
+        } catch (e) {
+            console.error(`@lid contact lookup failed for ${lid}`, e);
+        }
+    }
+
+    return null;
+}
+
+// THE single @lid → phone resolver, shared by the inbound leg, the operator
+// (fromMe) leg and history replay. It exists because those three grew separate
+// copies and they drifted: the fromMe copy guarded against trusting an @lid
+// contact id, the inbound copy did not, and so every privacy-keyed chat that
+// arrived customer-first was threaded onto a fabricated phone number.
+//
+// Order is cheapest-and-most-trusted first:
+//   1. the learned alias map — free, already proven for this chat;
+//   2. the contact object the caller already fetched — free, no extra roundtrip;
+//   3. one live lookup — a puppeteer roundtrip, so last.
+//
+// Anything that survives isUsablePhoneFor is learned for next time. A null
+// return means "no phone behind this privacy id", and every caller drops the
+// message rather than forward a counterparty the host can never match.
+export async function resolveLidToPhone(
+    userId: string,
+    lid: string,
+    client?: any,
+    contact?: any
+): Promise<string | null> {
+    const learned = resolveLidAlias(userId, lid);
+    if (learned && isUsablePhoneFor(lid, learned)) return learned;
+
+    const fromContact = phoneFromContact(contact);
+    if (fromContact && isUsablePhoneFor(lid, fromContact)) {
+        rememberLidAlias(userId, lid, fromContact);
+        return fromContact;
+    }
+
+    const looked = await lookupPhoneForLid(client, lid);
+    if (looked && isUsablePhoneFor(lid, looked)) {
+        rememberLidAlias(userId, lid, looked);
+        return looked;
+    }
+
+    return null;
 }
 
 // Minimal slice of whatsapp-web.js Client that backfill needs — a seam so the

@@ -22,6 +22,8 @@ import {
     normalizeInbound,
     processInbound,
     resetInboundState,
+    isUsablePhoneFor,
+    resolveLidToPhone,
     type ChatResolver,
     type InboundMsg
 } from './inbound';
@@ -331,6 +333,94 @@ test('processInbound resolves an @lid sender, then downloads for the kept messag
     expect(drained[0].mediaSize).toBe(10);
     expect(pushed).toEqual(drained);                        // webhook saw the same payload
     expect(loadTargets('pi2').has(LID_FROM)).toBe(true);    // alias allowlisted for backfill
+});
+
+// ── The inbound @lid leg must never invent a phone number (0.9.3) ──
+//
+// Prod evidence 2026-08-13: CMS inbox rows titled `128539848396…`, an id no
+// customer record could ever match. For an @lid sender the contact object's
+// `id.user` IS the privacy id's digits, and the inbound leg trusted it
+// unconditionally — minting `<lid>@c.us` and forwarding it as a phone. The
+// fromMe leg had carried the guard since 0.8.x; only this leg was missing it.
+test('processInbound never mints a phone out of the @lid digits when the contact has no number', async () => {
+    const m = mediaMsg({
+        from: LID_FROM,
+        // Exactly what an @lid contact reports: no `number`, and an `id` whose
+        // `user` is the LID itself.
+        getContact: async () => ({
+            pushname: 'Asha',
+            id: { _serialized: LID_FROM, user: '125417440686124' }
+        })
+    });
+
+    await processInbound('lidguard', m, { resolveMedia: resolveMediaForMessage });
+
+    // Dropped, NOT forwarded as 125417440686124@c.us.
+    expect(drainInbound('lidguard')).toEqual([]);
+    // And the poison never reached the persisted alias map.
+    expect(resolveLidAlias('lidguard', LID_FROM)).toBeUndefined();
+});
+
+test('processInbound resolves an @lid sender through getContactLidAndPhone when the contact carries no phone', async () => {
+    useMediaRoot('media-lid-pn-api');
+    let asked: string[] = [];
+    const m = mediaMsg({
+        from: LID_FROM,
+        getContact: async () => ({ pushname: 'Asha', id: { _serialized: LID_FROM, user: '125417440686124' } }),
+        client: {
+            getContactLidAndPhone: async (ids: string[]) => {
+                asked = ids;
+                return [ { lid: LID_FROM, pn: CUST } ];
+            }
+        }
+    });
+
+    await processInbound('lidpn', m, { resolveMedia: resolveMediaForMessage });
+
+    const drained = drainInbound('lidpn');
+    expect(asked).toEqual([ LID_FROM ]);
+    expect(drained.length).toBe(1);
+    expect(drained[0].from).toBe(CUST);          // the real phone, from the 1.34.7 API
+    expect(drained[0].senderLid).toBe(LID_FROM); // and the id it came from
+    expect(resolveLidAlias('lidpn', LID_FROM)).toBe(CUST); // learned for the fromMe leg
+});
+
+test('isUsablePhoneFor rejects a self-referential or non-phone resolution', () => {
+    expect(isUsablePhoneFor(LID_FROM, CUST)).toBe(true);
+    expect(isUsablePhoneFor(LID_FROM, '125417440686124@c.us')).toBe(false); // the LID's own digits
+    expect(isUsablePhoneFor(LID_FROM, LID_FROM)).toBe(false);               // still an @lid
+    expect(isUsablePhoneFor(LID_FROM, '@c.us')).toBe(false);                // no digits
+});
+
+test('rememberLidAlias refuses to persist a self-referential alias', () => {
+    rememberLidAlias('poison', LID_FROM, '125417440686124@c.us');
+
+    expect(resolveLidAlias('poison', LID_FROM)).toBeUndefined();
+    expect(existsSync(join(dirFor('poison'), 'lid_aliases.json'))).toBe(false);
+});
+
+test('loadLidAliases drops a poisoned entry written by an older version', () => {
+    // A service already poisoned in production: the file on disk maps the LID
+    // to its own digits. It must not survive the read.
+    rememberLidAlias('healed', LID_FROM, CUST);          // one good entry, persisted
+    const file = join(dirFor('healed'), 'lid_aliases.json');
+    const onDisk = JSON.parse(readFileSync(file, 'utf8'));
+    onDisk['999888777666@lid'] = '999888777666@c.us';    // the poison
+    require('fs').writeFileSync(file, JSON.stringify(onDisk));
+    resetInboundState();
+    configureInbound(dirFor);
+
+    expect(resolveLidAlias('healed', LID_FROM)).toBe(CUST);          // good one kept
+    expect(resolveLidAlias('healed', '999888777666@lid')).toBeUndefined(); // poison ignored
+});
+
+test('resolveLidToPhone prefers the learned alias over any live lookup', async () => {
+    rememberLidAlias('order', LID_FROM, CUST);
+    let lookups = 0;
+    const client = { getContactLidAndPhone: async () => { lookups += 1; return []; } };
+
+    expect(await resolveLidToPhone('order', LID_FROM, client)).toBe(CUST);
+    expect(lookups).toBe(0); // no puppeteer roundtrip when the map already knows
 });
 
 test('processInbound keeps an @c.us message when the contact lookup fails', async () => {
