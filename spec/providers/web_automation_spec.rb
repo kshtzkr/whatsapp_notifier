@@ -249,11 +249,13 @@ RSpec.describe WhatsAppNotifier::Providers::WebAutomation do
       adapter = double(
         fetch_qr_code: "qr", connection_status: {},
         list_chats: [{ id: "919@c.us", name: "Asha", last_message_at: 9 }],
-        fetch_history: [{ from: "919@c.us", body: "old", message_id: "h1" }]
+        fetch_history: [{ from: "919@c.us", body: "old", message_id: "h1" }],
+        resolve_lid: "919882536803"
       )
       config = build_config(path: File.join(dir, "session.json"), adapter: adapter)
       provider = described_class.new(configuration: config)
 
+      expect(provider.resolve_lid(lid: "125417440686124@lid", metadata: { user_id: 1 })).to eq("919882536803")
       expect(provider.list_chats(metadata: { user_id: 1 })).to eq([{ id: "919@c.us", name: "Asha", last_message_at: 9 }])
       expect(provider.fetch_history(chat_id: "919@c.us", limit: 20, metadata: { user_id: 1 }))
         .to eq([{ from: "919@c.us", body: "old", message_id: "h1" }])
@@ -282,6 +284,7 @@ RSpec.describe WhatsAppNotifier::Providers::WebAutomation do
 
       expect { provider.list_chats }.to raise_error(WhatsAppNotifier::ConfigurationError, /disabled/)
       expect { provider.fetch_history(chat_id: "919@c.us") }.to raise_error(WhatsAppNotifier::ConfigurationError, /disabled/)
+      expect { provider.resolve_lid(lid: "1@lid") }.to raise_error(WhatsAppNotifier::ConfigurationError, /disabled/)
     end
   end
 
@@ -293,6 +296,7 @@ RSpec.describe WhatsAppNotifier::Providers::WebAutomation do
 
       expect { provider.list_chats }.to raise_error(WhatsAppNotifier::ConfigurationError, /chat listing/)
       expect { provider.fetch_history(chat_id: "919@c.us") }.to raise_error(WhatsAppNotifier::ConfigurationError, /history replay/)
+      expect { provider.resolve_lid(lid: "1@lid") }.to raise_error(WhatsAppNotifier::ConfigurationError, /@lid resolution/)
     end
   end
 

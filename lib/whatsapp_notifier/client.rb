@@ -55,6 +55,10 @@ module WhatsAppNotifier
       provider_for(provider || @configuration.provider).fetch_history(chat_id: chat_id, limit: limit, metadata: metadata)
     end
 
+    def resolve_lid(lid:, metadata: {}, provider: nil)
+      provider_for(provider || @configuration.provider).resolve_lid(lid: lid, metadata: metadata)
+    end
+
     def logout(metadata: {}, provider: nil)
       provider_for(provider || @configuration.provider).logout(metadata: metadata)
     end

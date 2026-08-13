@@ -15,7 +15,10 @@ import {
     shouldCapture,
     normalizeInbound,
     resolveLidAlias,
-    rememberLidAlias
+    rememberLidAlias,
+    isUsablePhoneFor,
+    resolveLidToPhone,
+    jidDigits
 } from './inbound';
 import { verifyMediaToken, MediaResolution, sanitizeId } from './media';
 
@@ -120,11 +123,21 @@ export async function replayHistory(
     for (const m of (Array.isArray(msgs) ? msgs : [])) {
         if (!shouldCapture(userId, m)) continue;
         const inbound = normalizeInbound(m, m.hasMedia ? historyMediaInfo() : undefined);
-        if (inbound.fromMe && inbound.to && inbound.to.endsWith('@lid')) {
-            const resolved = requestedChatId || resolveLidAlias(userId, inbound.to);
+        // BOTH legs need resolving. The fromMe leg carries the @lid at `to`;
+        // the customer's own messages in the same chat carry it at `from` —
+        // that half used to be replayed with the raw privacy id, which the
+        // host then stored as if it were a phone number. Same rule for both:
+        // resolve or skip, never forward an @lid.
+        const lidKey = inbound.fromMe ? 'to' : 'from';
+        const rawCounterparty = inbound[lidKey];
+        if (rawCounterparty && rawCounterparty.endsWith('@lid')) {
+            const resolved = (requestedChatId && isUsablePhoneFor(rawCounterparty, requestedChatId))
+                ? requestedChatId
+                : resolveLidAlias(userId, rawCounterparty);
             if (!resolved) continue;
-            if (requestedChatId) rememberLidAlias(userId, inbound.to, requestedChatId);
-            inbound.to = resolved;
+            rememberLidAlias(userId, rawCounterparty, resolved);
+            inbound[lidKey] = resolved;
+            inbound.senderLid = rawCounterparty;
         }
         out.push(inbound);
     }
@@ -232,6 +245,49 @@ export async function historyResponse(
         return Response.json({ success: true, messages });
     } catch (error: any) {
         console.error(`History replay error for user ${userId}:`, error);
+        return deny(500, (error && error.message) || String(error));
+    }
+}
+
+// ── Privacy-id resolution (GET /contacts/lid/:userId?lid=…) ──
+//
+// Exposes the same resolver the capture pipeline uses, for ONE privacy id, so
+// a host can repair threads it already keyed on an unresolved @lid (rows it
+// stored back when the inbound leg fabricated a phone out of the LID's own
+// digits). Read-only: it looks a contact up, learns the alias, and answers
+// with the phone — it never touches a message or a queue.
+//
+// Same X-WA-Token + paired-and-ready gate as /chats and /history: an @lid →
+// phone mapping identifies a real person and must not be readable by anyone
+// who can reach the port.
+export async function lidResolveResponse(
+    userId: string,
+    lidParam: string | undefined,
+    token: string | undefined,
+    expectedToken: string | undefined,
+    deps: SessionGateDeps
+): Promise<Response> {
+    if (!verifyMediaToken(token, expectedToken)) return deny(401, 'unauthorized');
+
+    // Accept bare digits or a full id, and normalize to the `<digits>@lid`
+    // shape the resolver expects. sanitizeId is media.ts's traversal/garbage
+    // guard — the value reaches a puppeteer lookup.
+    const digits = jidDigits(sanitizeId(String(lidParam || '')));
+    if (!digits) return deny(422, '`lid` is required');
+    const lid = `${digits}@lid`;
+
+    const gate = await gatePairedReady(userId, deps);
+    if (gate instanceof Response) return gate;
+
+    try {
+        const pn = await resolveLidToPhone(userId, lid, gate.client);
+        gate.lastUsed = Date.now();
+        // A miss is a 200 with pn: null, not a 404 — "this privacy id has no
+        // recoverable phone" is a real answer the repair task acts on, and it
+        // must be told apart from "the request was wrong".
+        return Response.json({ success: true, lid, pn });
+    } catch (error: any) {
+        console.error(`@lid resolve error for user ${userId}:`, error);
         return deny(500, (error && error.message) || String(error));
     }
 }

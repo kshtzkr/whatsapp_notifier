@@ -16,6 +16,7 @@ import {
     historyResponse,
     findMessage,
     refetchResponse,
+    lidResolveResponse,
     type GatedClient,
     type HistoryDeps,
     type RefetchDeps
@@ -258,6 +259,44 @@ test('replayHistory resolves fromMe @lid counterparties to the requested chat id
     expect(resolveLidAlias('h1', LID)).toBe(CUST); // learned → live fromMe capture resolves too
 });
 
+// The other half of the same hole (0.9.3): only the fromMe leg was resolved,
+// so the CUSTOMER's own messages in an @lid-keyed chat were replayed carrying
+// the raw privacy id at `from`. The host strips the suffix and stores the
+// digits as a phone — the very thing the live leg now refuses to do.
+test('replayHistory resolves inbound @lid senders too, not just the fromMe leg', async () => {
+    const LID = '125417440686124@lid';
+    const history = await replayHistory('h1b', chatWith([
+        msg({ from: LID, body: 'customer says hi', id: { _serialized: 'c1' }, timestamp: 1 })
+    ]), 50, CUST);
+
+    expect(history.length).toBe(1);
+    expect(history[0].from).toBe(CUST);        // NOT 125417440686124@c.us
+    expect(history[0].senderLid).toBe(LID);
+    expect(resolveLidAlias('h1b', LID)).toBe(CUST);
+});
+
+test('replayHistory skips an inbound @lid it cannot resolve rather than forwarding the privacy id', async () => {
+    const LID = '125417440686124@lid';
+    // No requested chat id and no learned alias → nothing to resolve with.
+    const history = await replayHistory('h1c', chatWith([
+        msg({ from: LID, body: 'unmatchable', id: { _serialized: 'c1' }, timestamp: 1 })
+    ]), 50);
+
+    expect(history).toEqual([]);
+});
+
+test('replayHistory ignores a requested chat id that is really the privacy id itself', async () => {
+    const LID = '125417440686124@lid';
+    // A caller that passed the LID's own digits as the "phone" must not have
+    // that laundered into a resolution.
+    const history = await replayHistory('h1d', chatWith([
+        msg({ from: LID, body: 'nope', id: { _serialized: 'c1' }, timestamp: 1 })
+    ]), 50, '125417440686124@c.us');
+
+    expect(history).toEqual([]);
+    expect(resolveLidAlias('h1d', LID)).toBeUndefined();
+});
+
 test('replayHistory falls back to the learned alias map and skips unresolvable fromMe @lid items', async () => {
     const LID = '125417440686124@lid';
 
@@ -324,6 +363,56 @@ test('both routes enforce X-WA-Token before touching any client', async () => {
     const history = await historyResponse('1', { chatId: CUST }, undefined, 'expected', deps);
     expect(history.status).toBe(401);
     expect(deps.getClientCalls).toBe(0);
+});
+
+// ── GET /contacts/lid/:userId (0.9.3) ──
+
+test('lidResolveResponse enforces the token and the pairing gate before any lookup', async () => {
+    const deps = depsWith(readyClient(), { hasPaired: () => { throw new Error('gate must not run'); } });
+    const denied = await lidResolveResponse('1', '125417440686124', 'wrong', 'expected', deps);
+    expect(denied.status).toBe(401);
+    expect(deps.getClientCalls).toBe(0);
+
+    const unpaired = depsWith(readyClient(), { hasPaired: () => false });
+    expect((await lidResolveResponse('1', '125417440686124', undefined, undefined, unpaired)).status).toBe(401);
+    expect(unpaired.getClientCalls).toBe(0);
+});
+
+test('lidResolveResponse rejects a missing lid with a 422 before the gate', async () => {
+    const deps = depsWith(readyClient(), { hasPaired: () => { throw new Error('gate must not run'); } });
+    const res = await lidResolveResponse('1', undefined, undefined, undefined, deps);
+    expect(res.status).toBe(422);
+});
+
+test('lidResolveResponse answers the phone behind a privacy id and learns the alias', async () => {
+    const LID = '125417440686124@lid';
+    const data = readyClient({
+        client: { getContactLidAndPhone: async () => [ { lid: LID, pn: CUST } ] }
+    });
+
+    // Bare digits are accepted and normalized to the @lid shape.
+    const res = await lidResolveResponse('lr1', '125417440686124', undefined, undefined, depsWith(data));
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ success: true, lid: LID, pn: CUST });
+    expect(resolveLidAlias('lr1', LID)).toBe(CUST);
+    expect(data.lastUsed).toBeGreaterThan(0);
+});
+
+test('lidResolveResponse answers pn: null (not 404) when the privacy id has no phone behind it', async () => {
+    const data = readyClient({
+        client: {
+            getContactLidAndPhone: async () => [ { lid: '125417440686124@lid', pn: null } ],
+            // The fallback reports only the LID's own digits — must not be laundered.
+            getContactById: async () => ({ id: { _serialized: '125417440686124@lid', user: '125417440686124' } })
+        }
+    });
+
+    const res = await lidResolveResponse('lr2', '125417440686124@lid', undefined, undefined, depsWith(data));
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ success: true, lid: '125417440686124@lid', pn: null });
+    expect(resolveLidAlias('lr2', '125417440686124@lid')).toBeUndefined();
 });
 
 test('both routes accept a matching token and stay open when none is configured', async () => {
@@ -460,7 +549,10 @@ test('historyResponse resolves fromMe @lid items in an @lid-keyed chat to the re
     const payload = await res.json();
     expect(payload.messages).toEqual([{
         from: OPERATOR, to: CUST, fromMe: true, body: 'No still not',
-        messageId: 'op1', timestamp: 1717000000, type: 'chat'
+        messageId: 'op1', timestamp: 1717000000, type: 'chat',
+        // 0.9.3 wire: the privacy id the counterparty was resolved FROM, so
+        // the host can tell a repaired LID chat from an ordinary phone chat.
+        senderLid: LID
     }]);
     expect(resolveLidAlias('h9', LID)).toBe(CUST);
 });

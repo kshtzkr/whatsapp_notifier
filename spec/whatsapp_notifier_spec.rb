@@ -99,6 +99,7 @@ RSpec.describe WhatsAppNotifier do
     allow(fake_client).to receive(:refetch_media).and_return(mime: "image/jpeg", filename: nil, size: 5, status: "available")
     allow(fake_client).to receive(:list_chats).and_return([{ id: "919@c.us", name: "Asha", last_message_at: 9 }])
     allow(fake_client).to receive(:fetch_history).and_return([{ from: "919@c.us", body: "old", message_id: "h1" }])
+    allow(fake_client).to receive(:resolve_lid).and_return("919882536803")
     allow(fake_client).to receive(:logout).and_return(success: true)
     described_class.instance_variable_set(:@client, fake_client)
 
@@ -111,6 +112,7 @@ RSpec.describe WhatsAppNotifier do
     expect(described_class.refetch_media(message_id: "m1", chat_id: "919@c.us", provider: :web_automation, metadata: { user_id: 1 })).to include(status: "available")
     expect(described_class.list_chats(provider: :web_automation, metadata: { user_id: 1 })).to eq([{ id: "919@c.us", name: "Asha", last_message_at: 9 }])
     expect(described_class.fetch_history(chat_id: "919@c.us", limit: 20, provider: :web_automation, metadata: { user_id: 1 })).to eq([{ from: "919@c.us", body: "old", message_id: "h1" }])
+    expect(described_class.resolve_lid(lid: "125417440686124@lid", provider: :web_automation, metadata: { user_id: 1 })).to eq("919882536803")
     expect(described_class.logout(provider: :web_automation, metadata: { user_id: 1 })).to eq(success: true)
     expect(fake_client).to have_received(:fetch_media).with(message_id: "m1", provider: :web_automation, metadata: { user_id: 1 })
     expect(fake_client).to have_received(:delete_media).with(message_id: "m1", provider: :web_automation, metadata: { user_id: 1 })

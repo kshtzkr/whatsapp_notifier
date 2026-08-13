@@ -24,7 +24,7 @@ import {
     clearInbound,
     processInbound
 } from './inbound';
-import { chatsResponse, historyResponse, refetchResponse, HistoryDeps, RefetchDeps } from './history';
+import { chatsResponse, historyResponse, refetchResponse, lidResolveResponse, HistoryDeps, RefetchDeps } from './history';
 import {
     configureMedia,
     resolveMediaForMessage,
@@ -684,6 +684,18 @@ app.post('/history/:userId', async (c) =>
     historyResponse(
         c.req.param('userId'),
         await c.req.json().catch(() => ({})),
+        c.req.header('X-WA-Token'),
+        WEBHOOK_TOKEN,
+        historyDeps
+    ));
+
+// GET /contacts/lid/:userId?lid=… — resolve one privacy id to the phone behind
+// it, for a host repairing threads it keyed on an unresolved @lid. Token-gated
+// and paired+ready gated like /chats (see history.ts).
+app.get('/contacts/lid/:userId', (c) =>
+    lidResolveResponse(
+        c.req.param('userId'),
+        c.req.query('lid'),
         c.req.header('X-WA-Token'),
         WEBHOOK_TOKEN,
         historyDeps

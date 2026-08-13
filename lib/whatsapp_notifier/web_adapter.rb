@@ -34,7 +34,12 @@ module WhatsAppNotifier
       media_size: %w[mediaSize media_size],
       sender_name: %w[senderName sender_name],
       to: %w[to],
-      from_me: %w[fromMe from_me]
+      from_me: %w[fromMe from_me],
+      # 0.9.3: the `<digits>@lid` privacy id the counterparty above was
+      # RESOLVED FROM, present only for a privacy-keyed chat. The phone in
+      # from/to is always a real phone — this says where it came from, so a
+      # host can audit a thread's origin. Never a value to thread on.
+      sender_lid: %w[senderLid sender_lid]
     }.freeze
 
     def self.default_base_url
@@ -181,6 +186,27 @@ module WhatsAppNotifier
       body = { chatId: chat_id, limit: clamp_history_limit(limit) }
       response = request(:post, "/history/#{user_id}", body: body)
       Array(response["messages"]).map { |m| map_inbound_message(m) }
+    end
+
+    # Resolves ONE WhatsApp privacy id (`@lid`) to the phone number behind it,
+    # returning the bare digits or nil when nothing is recoverable.
+    #
+    # Hosts need this to repair conversations they keyed on an unresolved
+    # privacy id — rows written when the service still fabricated a "phone"
+    # out of the LID's own digits (fixed in 0.9.3). Live capture resolves on
+    # its own; this is the backward-looking half.
+    #
+    # nil is a real answer ("no phone behind this id"), not an error: the
+    # service replies 200 with pn: null, and only a transport/gate failure
+    # raises.
+    def resolve_lid(lid:, metadata: {})
+      user_id = user_id_from(metadata)
+      digits = lid.to_s.split("@").first.to_s.gsub(/\D/, "")
+      return nil if digits.empty?
+
+      response = request(:get, "/contacts/lid/#{user_id}?lid=#{digits}")
+      resolved = response["pn"].to_s.split("@").first.to_s.gsub(/\D/, "")
+      resolved.empty? ? nil : resolved
     end
 
     # Logs the user out of WhatsApp and clears their saved session on the service.

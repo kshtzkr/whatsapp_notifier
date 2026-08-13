@@ -454,6 +454,37 @@ RSpec.describe WhatsAppNotifier::WebAdapter do
       .to raise_error(/service request failed \(401\): User not authenticated/)
   end
 
+  # Privacy-id resolution (0.9.3): the half a host needs to repair threads it
+  # already keyed on an unresolved @lid.
+  it "resolves a privacy id to bare phone digits" do
+    allow(ENV).to receive(:[]).and_call_original
+    allow(ENV).to receive(:[]).with("WHATSAPP_WEBHOOK_TOKEN").and_return("sekrit")
+    response = http_success(body: { "success" => true, "lid" => "125417440686124@lid", "pn" => "919882536803@c.us" })
+    captured = nil
+    http = double("http")
+    allow(http).to receive(:request) { |req| captured = req; response }
+    allow(Net::HTTP).to receive(:start) { |*_args, **_kwargs, &blk| blk.call(http) }
+
+    expect(adapter.resolve_lid(lid: "125417440686124@lid", metadata: { user_id: "u-1" }))
+      .to eq("919882536803")
+    expect(captured).to be_a(Net::HTTP::Get)
+    expect(captured.path).to eq("/contacts/lid/u-1?lid=125417440686124")
+    expect(captured["X-WA-Token"]).to eq("sekrit")
+  end
+
+  it "returns nil when the privacy id has no phone behind it" do
+    allow(Net::HTTP).to receive(:start)
+      .and_return(http_success(body: { "success" => true, "lid" => "1@lid", "pn" => nil }))
+
+    expect(adapter.resolve_lid(lid: "125417440686124", metadata: {})).to be_nil
+  end
+
+  it "does not call the service for a lid with no digits" do
+    expect(Net::HTTP).not_to receive(:start)
+
+    expect(adapter.resolve_lid(lid: "@lid", metadata: {})).to be_nil
+  end
+
   it "fetches history with the token, posting the chat id and clamped limit" do
     allow(ENV).to receive(:[]).and_call_original
     allow(ENV).to receive(:[]).with("WHATSAPP_WEBHOOK_TOKEN").and_return("sekrit")
