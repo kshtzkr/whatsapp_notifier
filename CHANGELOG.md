@@ -11,7 +11,7 @@ follows [Semantic Versioning](https://semver.org).
 Restores media download and outbound sending, both broken by WhatsApp Web's
 move to LID addressing. Measured on production over the 24h before the fix:
 every media message resolved `download_failed` (the CMS showed "Media
-unavailable" on all of them), and every chat send returned HTTP 500.
+unavailable" on all of them), and 9 of 38 sends returned HTTP 500.
 
 ### Fixed
 
@@ -34,11 +34,14 @@ unavailable" on all of them), and every chat send returned HTTP 500.
   WhatsApp now reads the recipient's LID out of its own chat table during the
   send, and a first-contact number has no row there — the send died inside
   WhatsApp's bundle with `Lid is missing in chat table` (chat sends) or
-  `No LID for user` (broadcasts). `/send` now runs WhatsApp's own existence
-  query for the number first (`Client#getContactLidAndPhone`), which writes
-  that row, and re-runs it between retries when a LID failure comes back. The
-  warm-up is best effort: the send is attempted either way, so a resolver
-  hiccup can never turn a deliverable message into a hard failure.
+  `No LID for user` (broadcasts). Those two assertions are now retryable, and
+  the retry first runs WhatsApp's own existence query for the number
+  (`Client#getContactLidAndPhone`), which writes the missing row. Resolving
+  only after a failure rather than before every send keeps the healthy
+  majority of sends free of an extra WhatsApp query — a real cost on a
+  500-recipient broadcast. The resolution is best effort: the send is retried
+  either way, so a resolver hiccup can never turn a deliverable message into a
+  hard failure.
 
 ## [0.9.3] - 2026-08-13
 

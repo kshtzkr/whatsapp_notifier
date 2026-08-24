@@ -232,8 +232,8 @@ function clearChromiumSingletonLocks(userId: string) {
 function isTransientSendError(error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     return message.includes("getChat") || message.includes("Cannot read properties of undefined") ||
-        // Retryable only because the retry loop warms the LID mapping first
-        // (see warmLidMapping) — without that warm-up this would spin five
+        // Retryable only because the retry loop resolves the LID between
+        // attempts (see warmLidMapping) — on its own this would spin five
         // times on the same missing chat-table row.
         isLidResolutionError(error);
 }
@@ -257,15 +257,17 @@ async function installMessageIdPatch(userId: string, client: Client) {
     }
 }
 
-// Make WhatsApp resolve the recipient's LID before we ask it to send.
+// Make WhatsApp resolve the recipient's LID, after a send has already failed
+// for the want of it.
 //
 // getContactLidAndPhone runs WhatsApp's own queryWidExists for the number,
 // which is what writes the LID row the send path then reads. Without it a
 // first-contact chat (or one WhatsApp has since re-keyed) fails inside the
-// WhatsApp bundle with "Lid is missing in chat table" / "No LID for user".
+// WhatsApp bundle with "Lid is missing in chat table" / "No LID for user" —
+// around a quarter of production sends at the time of writing.
 //
-// Best effort: the send is attempted regardless, so a resolver hiccup can
-// never turn a deliverable message into a hard failure.
+// Best effort: the send is retried regardless, so a resolver hiccup can never
+// turn a deliverable message into a hard failure.
 async function warmLidMapping(client: Client, chatId: string) {
     try {
         const resolver = (client as any).getContactLidAndPhone;
@@ -294,10 +296,10 @@ async function sendMessageWithRetry(client: Client, clientData: ClientData, chat
 
     // Wait for the internal WWeb store to be fully loaded before first attempt
     await waitForClientReady(clientData);
-    // Resolve the recipient's LID up front — WhatsApp now reads it out of its
-    // chat table during the send itself, and a first-contact number has no row
-    // there yet (see warmLidMapping).
-    await warmLidMapping(client, chatId);
+    // The LID warm-up is deliberately NOT run up front: most recipients
+    // already have their chat-table row and would only pay an extra WhatsApp
+    // query for it — a real cost on a 500-recipient broadcast. The retry loop
+    // warms only the recipients that actually fail (see warmLidMapping).
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         try {
