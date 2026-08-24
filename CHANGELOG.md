@@ -6,6 +6,40 @@ follows [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [0.9.4] - 2026-08-24
+
+Restores media download and outbound sending, both broken by WhatsApp Web's
+move to LID addressing. Measured on production over the 24h before the fix:
+every media message resolved `download_failed` (the CMS showed "Media
+unavailable" on all of them), and every chat send returned HTTP 500.
+
+### Fixed
+
+- **The serialized message id is rebuilt when WhatsApp Web withholds it.**
+  Message models are produced in-page by `window.WWebJS.getMessageModel` and
+  marshalled to Node as JSON, which copies own enumerable properties only —
+  and `MsgKey._serialized` is no longer one. It arrived `undefined` on 100% of
+  captured messages (30 days of production logs: not one real id). That id is
+  the message's only handle, so the loss was total: `Message#downloadMedia`
+  passes it into the page and the lookup threw on `undefined`, failing EVERY
+  media download; and the host's dedupe key fell back to
+  `<counterparty>-<timestamp>`, which no longer matched the id returned by
+  `/send`, so a send's own echo could not be suppressed and two messages in the
+  same second on one chat collided onto a single id. Fixed in two layers: an
+  idempotent in-page wrapper around `getMessageModel`, re-armed on every
+  `ready`, fills `_serialized` where the accessor still works, and a Node-side
+  rebuild from the surviving key parts covers any session the patch could not
+  reach. Neither ever overwrites a `_serialized` WhatsApp does provide.
+- **Sends resolve the recipient's LID before asking WhatsApp to deliver.**
+  WhatsApp now reads the recipient's LID out of its own chat table during the
+  send, and a first-contact number has no row there — the send died inside
+  WhatsApp's bundle with `Lid is missing in chat table` (chat sends) or
+  `No LID for user` (broadcasts). `/send` now runs WhatsApp's own existence
+  query for the number first (`Client#getContactLidAndPhone`), which writes
+  that row, and re-runs it between retries when a LID failure comes back. The
+  warm-up is best effort: the send is attempted either way, so a resolver
+  hiccup can never turn a deliverable message into a hard failure.
+
 ## [0.9.3] - 2026-08-13
 
 Stops the service inventing phone numbers for privacy-id (`@lid`) chats. Seen

@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test';
-import { sentMessageId, sendValidationError, fetchMedia, captionOptions } from './send';
+import { sentMessageId, sendValidationError, fetchMedia, captionOptions, isLidResolutionError } from './send';
 
 // The id the host stores against its outbound record — it MUST be the real
 // serialized WhatsApp id so the fromMe echo of this send dedupes on it.
@@ -75,4 +75,24 @@ test('captionOptions omits the caption entirely for caption-less files', () => {
     expect(captionOptions('')).toEqual({});
     expect(captionOptions(undefined)).toEqual({});
     expect(captionOptions(null)).toEqual({});
+});
+
+// ── LID resolution failures ──
+//
+// These are WhatsApp's OWN assertion texts, thrown inside its bundle when the
+// chat table has no LID row for the recipient. There is no error code to key
+// on — the text is the whole signal — and the stack tail WhatsApp appends
+// (its minified bundle URL) must not stop the match.
+test('isLidResolutionError recognises both WhatsApp LID assertions', () => {
+    expect(isLidResolutionError(new Error('Lid is missing in chat table\ns (https://static.whatsapp.net/rsrc.php/v4/y3/r/QOqeh94VsFD.js:84:180)')))
+        .toBe(true);
+    expect(isLidResolutionError(new Error('No LID for user\ns (https://static.whatsapp.net/rsrc.php/v4/y3/r/QOqeh94VsFD.js:84:180)')))
+        .toBe(true);
+    expect(isLidResolutionError('No LID for user')).toBe(true); // thrown as a bare string
+});
+
+test('isLidResolutionError leaves unrelated send failures alone', () => {
+    expect(isLidResolutionError(new Error('Evaluation failed: TypeError'))).toBe(false);
+    expect(isLidResolutionError(new Error('User not authenticated'))).toBe(false);
+    expect(isLidResolutionError(undefined)).toBe(false);
 });

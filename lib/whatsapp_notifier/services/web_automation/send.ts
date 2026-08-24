@@ -50,6 +50,21 @@ export async function fetchMedia(messageMedia: MediaFactory, mediaUrl: string) {
     return messageMedia.fromUrl(mediaUrl, { unsafeMime: true });
 }
 
+// WhatsApp Web addresses chats by LID now, and resolves the LID for a plain
+// phone jid out of its own chat table. When that row is missing the send dies
+// inside WhatsApp's own bundle with one of these — WhatsApp assertion texts,
+// not whatsapp-web.js errors, so there is nothing to match on but the text:
+//   "Lid is missing in chat table"  — 1:1 send, chat row has no LID
+//   "No LID for user"               — recipient never resolved at all
+//
+// The row is populated by asking WhatsApp whether the number exists
+// (queryWidExists, reached through Client#getContactLidAndPhone), which is why
+// the warm-then-retry in index.ts clears both.
+export function isLidResolutionError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return message.includes('Lid is missing in chat table') || message.includes('No LID for user');
+}
+
 // sendMessage options for a media send: caption only when there IS one. A
 // caption-less file arrives with message "" — omitting the key entirely
 // matches a hand-sent file instead of attaching an empty caption.
