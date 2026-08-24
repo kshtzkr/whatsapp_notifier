@@ -33,7 +33,8 @@ import {
     mediaGetResponse,
     mediaDeleteResponse
 } from './media';
-import { sentMessageId, sendValidationError, fetchMedia, captionOptions } from './send';
+import { sentMessageId, sendValidationError, fetchMedia, captionOptions, isLidResolutionError } from './send';
+import { MESSAGE_MODEL_ID_PATCH, ensureSerializedId } from './message_id';
 
 const app = new Hono();
 const port = Number(process.env.PORT || 3001);
@@ -136,6 +137,12 @@ async function pushSessionEvent(userId: string, event: 'session_ready') {
 // webhook). The catch keeps a single bad message from killing the listener.
 async function captureInbound(userId: string, msg: any) {
     try {
+        // Second line of defence for the missing `id._serialized` (see
+        // message_id.ts): the page-side patch is the real fix, this rebuilds
+        // the id from whatever crossed the boundary. It has to happen BEFORE
+        // media resolution — downloadMedia reads `this.id._serialized` off
+        // this exact object.
+        ensureSerializedId(msg);
         await processInbound(userId, msg, {
             resolveMedia: resolveMediaForMessage,
             push: pushWebhook
@@ -224,7 +231,51 @@ function clearChromiumSingletonLocks(userId: string) {
 
 function isTransientSendError(error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
-    return message.includes("getChat") || message.includes("Cannot read properties of undefined");
+    return message.includes("getChat") || message.includes("Cannot read properties of undefined") ||
+        // Retryable only because the retry loop resolves the LID between
+        // attempts (see warmLidMapping) — on its own this would spin five
+        // times on the same missing chat-table row.
+        isLidResolutionError(error);
+}
+
+// Install the in-page getMessageModel wrapper that restores `id._serialized`
+// (see message_id.ts for why WhatsApp stopped handing it over).
+//
+// Best effort by design: a session whose page is mid-navigation just keeps the
+// Node-side rebuild in captureInbound. Never rejects — the ready handler must
+// carry on to the backfill either way.
+async function installMessageIdPatch(userId: string, client: Client) {
+    try {
+        const page = (client as any).pupPage;
+        if (!page) return 'no-page';
+        const result = await page.evaluate(MESSAGE_MODEL_ID_PATCH);
+        console.log(`Message-id patch for User ${userId}: ${result}`);
+        return result;
+    } catch (e) {
+        console.error(`Message-id patch failed for ${userId}`, e);
+        return 'failed';
+    }
+}
+
+// Make WhatsApp resolve the recipient's LID, after a send has already failed
+// for the want of it.
+//
+// getContactLidAndPhone runs WhatsApp's own queryWidExists for the number,
+// which is what writes the LID row the send path then reads. Without it a
+// first-contact chat (or one WhatsApp has since re-keyed) fails inside the
+// WhatsApp bundle with "Lid is missing in chat table" / "No LID for user" —
+// around a quarter of production sends at the time of writing.
+//
+// Best effort: the send is retried regardless, so a resolver hiccup can never
+// turn a deliverable message into a hard failure.
+async function warmLidMapping(client: Client, chatId: string) {
+    try {
+        const resolver = (client as any).getContactLidAndPhone;
+        if (typeof resolver !== 'function') return;
+        await resolver.call(client, [chatId]);
+    } catch (e) {
+        console.error(`LID warm-up failed for ${chatId}`, e);
+    }
 }
 
 async function waitForClientReady(clientData: ClientData, timeoutMs = 30000): Promise<void> {
@@ -245,6 +296,10 @@ async function sendMessageWithRetry(client: Client, clientData: ClientData, chat
 
     // Wait for the internal WWeb store to be fully loaded before first attempt
     await waitForClientReady(clientData);
+    // The LID warm-up is deliberately NOT run up front: most recipients
+    // already have their chat-table row and would only pay an extra WhatsApp
+    // query for it — a real cost on a 500-recipient broadcast. The retry loop
+    // warms only the recipients that actually fail (see warmLidMapping).
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         try {
@@ -262,6 +317,10 @@ async function sendMessageWithRetry(client: Client, clientData: ClientData, chat
             if (!isTransientSendError(error) || attempt === maxAttempts) {
                 throw error;
             }
+
+            // A LID failure is not a hydration problem — the mapping is simply
+            // absent, so re-run the resolver before spending the next attempt.
+            if (isLidResolutionError(error)) await warmLidMapping(client, chatId);
 
             // Wait longer between retries to give the store time to hydrate
             await new Promise((resolve) => setTimeout(resolve, attempt * 3000));
@@ -344,11 +403,23 @@ async function getOrCreateClient(userId: string): Promise<ClientData> {
         clearReadyTimer(clientData);
         initRetries.reset(userId);
         console.log(`Client is READY for User ${userId}`);
+        // Re-arm the message-id repair on EVERY ready: whatsapp-web.js
+        // re-injects its own window.WWebJS on each page load, which drops our
+        // wrapper, and 'ready' is the one event that fires again after a
+        // reload. Must run before the backfill below, so replayed messages
+        // carry real ids too.
+        const patched = installMessageIdPatch(userId, client);
         // Wake the host NOW — a campaign parked on "session down" should not
         // wait out a polling interval when the session just came back.
         pushSessionEvent(userId, 'session_ready').catch(console.error);
-        // Replay anything that arrived while we were disconnected.
-        backfillInbound(userId, client).catch((e) => console.error(`Backfill failed for ${userId}`, e));
+        // Replay anything that arrived while we were disconnected — after the
+        // patch, so replayed messages carry real ids and their media can be
+        // fetched. A failed patch must not cancel the backfill: the Node-side
+        // rebuild in captureInbound still applies.
+        patched
+            .catch(() => undefined)
+            .then(() => backfillInbound(userId, client))
+            .catch((e) => console.error(`Backfill failed for ${userId}`, e));
     });
 
     // Capture BOTH directions of every 1:1 chat. Only 'message_create' — it
@@ -621,6 +692,9 @@ app.post('/send/:userId', async (c) => {
         data.lastUsed = Date.now();
         // messageId is the echo-dedupe key: this send fires its own fromMe
         // message_create, which the host must match by id (see send.ts).
+        // Repaired first for the same reason as capture — an id-less send
+        // response means the echo comes back as a duplicate operator bubble.
+        ensureSerializedId(sent);
         const messageId = sentMessageId(sent);
         // Register the id so the echo is suppressed service-side (no media
         // re-download, no queue slot, no webhook — see inbound.ts). Best
