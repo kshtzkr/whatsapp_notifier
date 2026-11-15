@@ -66,6 +66,16 @@ test('fetchMedia downloads with unsafeMime so extension-less URLs work', async (
     expect(calls).toEqual([['https://host/rails/active_storage/blobs/proxy/abc123', { unsafeMime: true }]]);
 });
 
+// Bun's fetch reads file:// URLs, so an unchecked mediaUrl would send any
+// file on the service host to the recipient.
+test('fetchMedia refuses anything but http(s) without fetching', async () => {
+    let fetched = false;
+    const fakeMessageMedia = { fromUrl: async () => { fetched = true; } };
+
+    await expect(fetchMedia(fakeMessageMedia, 'file:///etc/passwd')).rejects.toThrow('http(s)');
+    expect(fetched).toBe(false);
+});
+
 // ── caption shape ──
 test('captionOptions carries the caption when there is one', () => {
     expect(captionOptions('itinerary attached')).toEqual({ caption: 'itinerary attached' });
