@@ -9,7 +9,8 @@ import {
     reapLimitMs,
     touchClient,
     shouldWipeSessionOnReap,
-    requestAllowed
+    requestAllowed,
+    safeUserId
 } from './sessions';
 
 const root = mkdtempSync(join(tmpdir(), 'wa-sessions-'));
@@ -166,5 +167,14 @@ describe('requestAllowed', () => {
 
     test('the liveness probe stays open', () => {
         expect(requestAllowed('/health', undefined, 's3cret', '10.0.0.9')).toBe(true);
+    });
+});
+
+describe('safeUserId', () => {
+    test('passes plain ids and refuses one that would leave the session dir', () => {
+        expect(safeUserId('default')).toBe('default');
+        expect(safeUserId('42')).toBe('42');
+        expect(() => safeUserId('x/../../canary')).toThrow();
+        expect(() => safeUserId('')).toThrow();
     });
 });

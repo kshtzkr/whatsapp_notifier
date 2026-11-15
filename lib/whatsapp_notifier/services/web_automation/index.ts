@@ -12,7 +12,8 @@ import {
     reapLimitMs,
     touchClient,
     shouldWipeSessionOnReap,
-    requestAllowed
+    requestAllowed,
+    safeUserId
 } from './sessions';
 import {
     InboundMsg,
@@ -197,7 +198,7 @@ function clearInitTimer(clientData: ClientData) {
 }
 
 function sessionDirForUser(userId: string) {
-    return join(SESSION_BASE_DIR, `session-user-${userId}`);
+    return join(SESSION_BASE_DIR, `session-user-${safeUserId(userId)}`);
 }
 
 function clearChromiumSingletonLocks(userId: string) {

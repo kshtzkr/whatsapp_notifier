@@ -22,6 +22,13 @@ export function requestAllowed(
     return LOOPBACK.has(remoteAddress ?? '');
 }
 
+// A user id becomes a path segment under the session dir, so "x/../.." would
+// walk out of it. Same charset LocalAuth accepts for its clientId.
+export function safeUserId(userId: string): string {
+    if (!/^[-\w]{1,64}$/.test(userId)) throw new Error('Invalid user id');
+    return userId;
+}
+
 // True when the user has a live in-memory client OR a persisted LocalAuth
 // session dir on disk (i.e. they paired at some point and can plausibly be
 // authenticated). Routes that only *use* an existing pairing — POST /send,
