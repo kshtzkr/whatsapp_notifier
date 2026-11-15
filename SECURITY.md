@@ -34,9 +34,9 @@ fixed.
 This gem automates an unofficial WhatsApp Web session and runs a local service
 that drives a browser. Two settings matter for a safe deployment:
 
-- Set `WHATSAPP_WEBHOOK_TOKEN` in production. It gates the service's `/media`,
-  `/chats`, and `/history` routes, which expose conversation content.
-- Keep the service bound to localhost or an otherwise private network. It has no
-  authentication of its own beyond the token above.
+- Set `WHATSAPP_WEBHOOK_TOKEN` whenever the service is reached from another host
+  or container. With it set, every route except `/health` requires it.
+- Without a token the service answers only callers on its own machine
+  (loopback). Every other request gets a 401.
 
 See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for both settings.

@@ -11,7 +11,8 @@ import {
     isReadyWedged,
     reapLimitMs,
     touchClient,
-    shouldWipeSessionOnReap
+    shouldWipeSessionOnReap,
+    requestAllowed
 } from './sessions';
 import {
     InboundMsg,
@@ -820,5 +821,10 @@ process.on('SIGTERM', () => {
 // Correct way to keep Bun process alive with Hono
 export default Bun.serve({
     port: port,
-    fetch: app.fetch,
+    // Checked here, ahead of the router, so no route can be reached around it.
+    fetch: (req, server) =>
+        requestAllowed(new URL(req.url).pathname, req.headers.get('X-WA-Token') ?? undefined,
+                       WEBHOOK_TOKEN, server.requestIP(req)?.address)
+            ? app.fetch(req, server)
+            : Response.json({ error: 'unauthorized' }, { status: 401 }),
 });

@@ -44,7 +44,7 @@ Read by the gem (the adapter, doctor, and CLI):
 | --- | --- | --- |
 | `WHATSAPP_NOTIFIER_SERVICE_URL` | `http://127.0.0.1:3001` | Base URL of the service. `https://` URLs are honored natively. |
 | `WHATSAPP_SERVICE_URL` | (unset) | Legacy alias used only when `WHATSAPP_NOTIFIER_SERVICE_URL` is unset. |
-| `WHATSAPP_WEBHOOK_TOKEN` | (unset) | When set, the adapter sends it as the `X-WA-Token` header on media, chats, and history requests, matching the service's gate. |
+| `WHATSAPP_WEBHOOK_TOKEN` | (unset) | When set, the adapter sends it as the `X-WA-Token` header on every request, matching the service's gate. |
 | `PUPPETEER_EXECUTABLE_PATH` | (unset) | Path to the Chromium/Chrome binary. Checked by `doctor` and the `service` command. |
 | `WHATSAPP_SESSION_DIR` | `tmp/whatsapp_notifier/.wwebjs_auth` (via `doctor`/CLI) | Session directory the `doctor` check and the `service` launcher use. See the note below. |
 
@@ -62,7 +62,7 @@ Read by the bundled Bun service under
 | `WWEBJS_WEB_VERSION` | (library default) | Pin the WhatsApp Web build (for example `2.3000.1023204887`) so a live change on web.whatsapp.com cannot break the client. |
 | `WWEBJS_WEB_VERSION_CACHE_URL` | wa-version template URL | Remote cache location for the pinned web version. |
 | `WHATSAPP_WEBHOOK_URL` | (unset) | If set, the service POSTs each inbound message here instead of relying only on polling. |
-| `WHATSAPP_WEBHOOK_TOKEN` | (unset) | Shared secret sent as `X-WA-Token` on webhook pushes. When set, it also gates `/media`, `/chats`, and `/history`. Set it in production. |
+| `WHATSAPP_WEBHOOK_TOKEN` | (unset) | Shared secret sent as `X-WA-Token` on webhook pushes and required on every route except `/health`. Unset, the service answers only loopback callers, so set it whenever Rails runs on another host or container. |
 | `WHATSAPP_MAX_CONCURRENT_INITS` | `3` | Cap on concurrent Chromium launches, so a herd of cold starts cannot exhaust memory. |
 | `WHATSAPP_UNREADY_REAP_MS` | `1800000` (30 min) | Destroy non-ready clients idle at least this long (abandoned pairing screens). Ready clients keep a 72h idle limit. |
 | `WHATSAPP_BROWSER_TIMEOUT_MS` | `60000` | Puppeteer browser launch timeout. |

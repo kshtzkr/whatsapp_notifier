@@ -69,7 +69,8 @@ Nothing here touches the official WhatsApp Business API. The service pairs like
 WhatsApp Web on a laptop, which is why setup needs no Meta account, and why the
 bulk-delivery guardrails exist. Point the gem at a remote service with
 `WHATSAPP_NOTIFIER_SERVICE_URL` (or `WHATSAPP_SERVICE_URL`); `https://` URLs are
-honored natively.
+honored natively. A remote service needs `WHATSAPP_WEBHOOK_TOKEN` set on both
+sides.
 
 ## Installation
 
