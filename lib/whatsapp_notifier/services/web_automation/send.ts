@@ -47,6 +47,8 @@ type MediaFactory = { fromUrl: (url: string, options?: object) => Promise<any> }
 // unsafeMime downloads anyway and trusts the response Content-Type header,
 // which those hosts set correctly.
 export async function fetchMedia(messageMedia: MediaFactory, mediaUrl: string) {
+    // http(s) only: Bun's fetch also reads file:// URLs, i.e. any local file.
+    if (!/^https?:\/\//i.test(mediaUrl)) throw new Error('mediaUrl must be an http(s) URL');
     return messageMedia.fromUrl(mediaUrl, { unsafeMime: true });
 }
 

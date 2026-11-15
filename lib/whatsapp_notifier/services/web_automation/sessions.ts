@@ -5,6 +5,29 @@
 // whatsapp-web.js.
 
 import { existsSync } from 'fs';
+import { verifyMediaToken } from './media';
+
+// Gate for EVERY route — index.ts runs it before the router. With a token
+// configured the caller must present it; with none only this machine may
+// call, so an unconfigured service is never open to the network.
+const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+export function requestAllowed(
+    path: string,
+    token: string | undefined,
+    expected: string | undefined,
+    remoteAddress: string | undefined
+): boolean {
+    if (path === '/health') return true; // liveness probes carry no token
+    if (expected) return verifyMediaToken(token, expected);
+    return LOOPBACK.has(remoteAddress ?? '');
+}
+
+// A user id becomes a path segment under the session dir, so "x/../.." would
+// walk out of it. Same charset LocalAuth accepts for its clientId.
+export function safeUserId(userId: string): string {
+    if (!/^[-\w]{1,64}$/.test(userId)) throw new Error('Invalid user id');
+    return userId;
+}
 
 // True when the user has a live in-memory client OR a persisted LocalAuth
 // session dir on disk (i.e. they paired at some point and can plausibly be

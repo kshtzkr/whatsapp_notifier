@@ -8,7 +8,9 @@ import {
     isReadyWedged,
     reapLimitMs,
     touchClient,
-    shouldWipeSessionOnReap
+    shouldWipeSessionOnReap,
+    requestAllowed,
+    safeUserId
 } from './sessions';
 
 const root = mkdtempSync(join(tmpdir(), 'wa-sessions-'));
@@ -147,5 +149,32 @@ describe('isReadyWedged', () => {
         expect(isReadyWedged({ state: 'QR_REQUIRED', ready: false })).toBe(false);   // QR is showing
         expect(isReadyWedged({ state: 'DISCONNECTED', ready: false })).toBe(false);  // disconnect path
         expect(isReadyWedged({ state: 'INITIALIZING', ready: false })).toBe(false);  // init watchdog owns it
+    });
+});
+
+describe('requestAllowed', () => {
+    test('with a token configured every route needs it, even from this machine', () => {
+        expect(requestAllowed('/send/1', undefined, 's3cret', '127.0.0.1')).toBe(false);
+        expect(requestAllowed('/inbound/1', 'wrong', 's3cret', '127.0.0.1')).toBe(false);
+        expect(requestAllowed('/send/1', 's3cret', 's3cret', '10.0.0.9')).toBe(true);
+    });
+
+    test('with no token configured only this machine may call', () => {
+        expect(requestAllowed('/qr/1', undefined, undefined, '127.0.0.1')).toBe(true);
+        expect(requestAllowed('/qr/1', undefined, undefined, '10.0.0.9')).toBe(false);
+        expect(requestAllowed('/qr/1', undefined, undefined, undefined)).toBe(false);
+    });
+
+    test('the liveness probe stays open', () => {
+        expect(requestAllowed('/health', undefined, 's3cret', '10.0.0.9')).toBe(true);
+    });
+});
+
+describe('safeUserId', () => {
+    test('passes plain ids and refuses one that would leave the session dir', () => {
+        expect(safeUserId('default')).toBe('default');
+        expect(safeUserId('42')).toBe('42');
+        expect(() => safeUserId('x/../../canary')).toThrow();
+        expect(() => safeUserId('')).toThrow();
     });
 });

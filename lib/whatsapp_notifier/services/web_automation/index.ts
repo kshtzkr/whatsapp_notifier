@@ -11,7 +11,9 @@ import {
     isReadyWedged,
     reapLimitMs,
     touchClient,
-    shouldWipeSessionOnReap
+    shouldWipeSessionOnReap,
+    requestAllowed,
+    safeUserId
 } from './sessions';
 import {
     InboundMsg,
@@ -196,7 +198,7 @@ function clearInitTimer(clientData: ClientData) {
 }
 
 function sessionDirForUser(userId: string) {
-    return join(SESSION_BASE_DIR, `session-user-${userId}`);
+    return join(SESSION_BASE_DIR, `session-user-${safeUserId(userId)}`);
 }
 
 function clearChromiumSingletonLocks(userId: string) {
@@ -820,5 +822,10 @@ process.on('SIGTERM', () => {
 // Correct way to keep Bun process alive with Hono
 export default Bun.serve({
     port: port,
-    fetch: app.fetch,
+    // Checked here, ahead of the router, so no route can be reached around it.
+    fetch: (req, server) =>
+        requestAllowed(new URL(req.url).pathname, req.headers.get('X-WA-Token') ?? undefined,
+                       WEBHOOK_TOKEN, server.requestIP(req)?.address)
+            ? app.fetch(req, server)
+            : Response.json({ error: 'unauthorized' }, { status: 401 }),
 });
