@@ -6,6 +6,27 @@ follows [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-16
+
+Security release for the bundled service.
+
+**Upgrade note:** a service reached from another host or container now needs
+`WHATSAPP_WEBHOOK_TOKEN` set on both sides. Without it every route except
+`/health` answers 401. A service and app on the same machine need no change.
+
+### Security
+
+- **Every route is authenticated.** `/send`, `/inbound`, `/qr`, `/status`,
+  `/logout` and `/metrics` had no check, and the token gate on the media and
+  history routes was skipped when no token was set. The token is now required
+  on every route except `/health`. With no token configured only loopback
+  callers are served.
+- **User ids are validated before they become a path.** An id such as
+  `x%2F..%2F..%2Fdir` made `POST /logout` delete a directory outside the
+  session directory. Ids outside `[-_A-Za-z0-9]{1,64}` are now refused.
+- **Media URLs must be http(s).** A `file://` `mediaUrl` read a local file and
+  sent it to the recipient.
+
 ## [0.9.4] - 2026-08-24
 
 Restores media download and outbound sending, both broken by WhatsApp Web's
