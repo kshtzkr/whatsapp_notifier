@@ -6,6 +6,21 @@ follows [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-11-26
+
+Restores QR pairing. WhatsApp Web no longer loads `WAWebSocketModel` on the
+logged-out QR screen, so every new client failed two seconds after launch with
+`Cannot read properties of null (reading 'Socket')` and no QR was ever
+produced. Sessions that were already loaded kept working.
+
+### Changed
+
+- **whatsapp-web.js 1.34.7 → upstream commit `38eb45b`** ("fix: Socket",
+  2026-11-24), which reads the socket state from `WAWebBackendEventBus`.
+  1.34.8, the newest npm release, still waits on the old module and times out
+  after 30 s. Pinned to the full commit SHA; move back to an npm version once
+  one ships with this fix.
+
 ## [0.9.4] - 2026-08-24
 
 Restores media download and outbound sending, both broken by WhatsApp Web's
